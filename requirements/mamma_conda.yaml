@@ -1,0 +1,17 @@
+name: mamma
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  - numpy<2
+  # nodejs is here so `npm install` + `npm run dev` for the GUI's Vite
+  # frontend work inside the same env that runs the pipeline. Keeps the
+  # whole project on one conda env instead of forcing users to manage
+  # Node separately.
+  - nodejs=20
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.5.1
+      - torchvision==0.20.1
