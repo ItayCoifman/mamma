@@ -592,6 +592,12 @@ def _run_mpi(asset: DataAsset, username: str, password: str, job_id: str) -> Non
         tmp = dest_path.with_suffix(dest_path.suffix + ".part")
     try:
         _check_url(request_url)
+        # Ensure the staging dir exists before streaming into `<dest>.part`.
+        # For non-extract assets tmp.parent is the destination's parent
+        # (e.g. data/weights/ma_2d/), which may not exist yet; for extract
+        # assets it's data/. Mirrors the `mkdir -p` the shell downloaders do
+        # and the dest.parent.mkdir() that _run_public/_run_gdrive already do.
+        tmp.parent.mkdir(parents=True, exist_ok=True)
         # Match wget's request fingerprint exactly. The MPI download.php
         # endpoint serves the file body for wget but returns an HTML
         # landing page for "vanilla" urllib calls — observed difference
