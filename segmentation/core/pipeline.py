@@ -447,21 +447,34 @@ class SegmentMultipleFrames:
         Both SAM2 and SAM3 support MP4 natively via decord.
 
         Fallback chain:
-          1. Try init_state with the given path (directory or MP4)
-          2. If it fails and frame images exist, retry with a sanitized local copy
+          1. Try init_state with the given path (directory or MP4).
+          2. If it fails AND ``video_dir`` is a directory of frame images,
+             retry with a sanitized local copy.
+
+        The sanitized-frames recovery re-reads and rewrites individual frame
+        files, so it only applies to a directory of images. For an MP4 file
+        (video input) there are no per-frame files on disk — joining the mp4
+        path with frame names would treat the file as a directory (ENOTDIR) —
+        so the original init error is re-raised instead of attempting it.
         """
         try:
             state = self.predictor.init_state(video_path=video_dir)
             return state, video_dir
         except Exception as exc:
-            self._log_warn(
-                f"[{context_name}] SAM init_state failed for '{video_dir}'. "
-                f"Retrying with sanitized frames. Error: {exc}"
-            )
+            init_error = exc
 
+        # Only a directory of frame images can be sanitized. For an MP4 file
+        # (or an empty frame list) there is nothing to sanitize, so surface
+        # the real init error rather than reading the mp4 path as a directory.
+        if not os.path.isdir(video_dir):
+            raise init_error
         if frame_names is None or len(frame_names) == 0:
             raise RuntimeError(f"[{context_name}] Cannot build sanitized frames: empty frame list.")
 
+        self._log_warn(
+            f"[{context_name}] SAM init_state failed for '{video_dir}'. "
+            f"Retrying with sanitized frames. Error: {init_error}"
+        )
         sanitized_dir, replaced = self._build_sanitized_video_dir(video_dir, frame_names, output_path)
         try:
             state = self.predictor.init_state(video_path=sanitized_dir)
