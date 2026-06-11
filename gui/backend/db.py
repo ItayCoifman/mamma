@@ -56,6 +56,28 @@ def _parse_ts(value):
         return None
 
 
+def _iso_utc(value):
+    """Serialize a stored ``created_at`` as an explicit-UTC ISO-8601 string.
+
+    SQLite's ``CURRENT_TIMESTAMP`` records naive UTC; with ``PARSE_DECLTYPES``
+    the value comes back as a naive ``datetime``. Rendering it with ``str()``
+    drops any timezone marker (``'2026-06-11 08:06:54'``), and the browser's
+    ``Date.parse`` then reads that as the *viewer's local* time, skewing
+    "X ago" displays by the local UTC offset. Emitting an explicit ``Z``
+    (``'2026-06-11T08:06:54Z'``) makes the instant unambiguous on the wire,
+    so every endpoint and page agrees.
+
+    Accepts a ``datetime`` or a stored string; returns ``None`` for empty
+    input and falls back to ``str(value)`` for anything unparseable.
+    """
+    if value is None or value == "":
+        return None
+    dt = value if isinstance(value, datetime) else _parse_ts(value)
+    if dt is None:
+        return str(value)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def initialize_database():
     with create_connection() as conn:
         cur = conn.cursor()
@@ -462,7 +484,7 @@ def get_all_task_minimal():
             out.append({
                 "taskId": str(r["task_id"]),
                 "username": r["username"],
-                "createdAt": str(r["created_at"]),
+                "createdAt": _iso_utc(r["created_at"]),
                 "outputPath": r["output_path"],
                 "outputId": r["output_id"],
                 "taskJsonPath": r["task_json_path"],
@@ -503,7 +525,7 @@ def get_unfinished_tasks_info():
                 "task_id": r["task_id"],
                 "username": r["username"],
                 "dag_job_id": r["dag_job_id"],
-                "created_at": str(r["created_at"]) if r["created_at"] else "",
+                "created_at": _iso_utc(r["created_at"]) if r["created_at"] else "",
             }
             for r in cur.fetchall()
         ]
@@ -607,7 +629,7 @@ def _list_processes_for_task_ids(task_ids):
                 "sequenceName": r["sequence_name"],
                 "processType": r["process"],
                 "status": r["status"],
-                "createdAt": str(r["created_at"]),
+                "createdAt": _iso_utc(r["created_at"]),
                 "pid": r["cluster_job_id"],  # legacy column name; surface as generic pid
                 "outFile": r["out_file"],
                 "errFile": r["err_file"],
@@ -649,7 +671,7 @@ def get_all_active_tasks_with_processes():
                     "captureName": r["capture_name"],
                     "captureJsonPath": r["capture_json_path"],
                     "username": r["username"],
-                    "createdAt": info.get("created_at", str(r["created_at"])),
+                    "createdAt": info.get("created_at", _iso_utc(r["created_at"])),
                     "runnerPid": info.get("dag_job_id"),  # legacy column name
                     "processes": [],
                 }
@@ -659,7 +681,7 @@ def get_all_active_tasks_with_processes():
                     "sequenceName": r["sequence_name"],
                     "processType": r["process"],
                     "status": r["status"],
-                    "createdAt": str(r["created_at"]),
+                    "createdAt": _iso_utc(r["created_at"]),
                     "pid": r["cluster_job_id"],
                     "outFile": r["out_file"],
                     "errFile": r["err_file"],
@@ -865,7 +887,13 @@ def get_all_captures():
                 (cid,),
             )
             latest_task = cur.fetchone()
-            created_at = str(latest_task["created_at"]) if latest_task else "N/A"
+            created_at = _iso_utc(latest_task["created_at"]) if latest_task else "N/A"
+            # Normalize the latest-task dict's timestamp too, so lastTaskAt
+            # goes out as ISO-UTC ('...Z') instead of relying on jsonify's
+            # RFC-1123 'GMT' rendering — keeps every endpoint on one format.
+            latest_task_dict = dict(latest_task) if latest_task else None
+            if latest_task_dict is not None:
+                latest_task_dict["created_at"] = _iso_utc(latest_task_dict.get("created_at"))
 
             # Roll up actual process statuses across all of this capture's
             # tasks instead of the placeholder "Pending" the original schema
@@ -900,7 +928,7 @@ def get_all_captures():
                     # Latest task hints — frontend uses these to render
                     # "last run X ago" + a thumbnail. Path resolution is
                     # done in app.py so the DB layer stays filesystem-free.
-                    "latest_task": dict(latest_task) if latest_task else None,
+                    "latest_task": latest_task_dict,
                 }
             )
         return out
@@ -950,7 +978,7 @@ def get_capture_details(capture_name):
                 {
                     "task_id": tid,
                     "username": tr["username"],
-                    "created_at": str(tr["created_at"]),
+                    "created_at": _iso_utc(tr["created_at"]),
                     "processes": procs,
                     "output_path": tr["output_path"],
                     "output_id": tr["output_id"],
@@ -1193,7 +1221,7 @@ def get_tasks_grouped_by_output_id(capture_id):
             groups.append({
                 "outputId": output_id,
                 "submissions": row["submissions"],
-                "lastSubmittedAt": str(row["last_at"]),
+                "lastSubmittedAt": _iso_utc(row["last_at"]),
                 "latestTaskId": str(latest["task_id"]) if latest else None,
                 "latestTaskJsonPath": latest["task_json_path"] if latest else None,
                 "latestOutputPath": latest["output_path"] if latest else None,
@@ -1345,7 +1373,7 @@ def get_all_tasks_with_processes():
                     "captureJsonPath": r["capture_json_path"],
                     "presetPath": r["preset_path"],
                     "username": r["username"],
-                    "createdAt": str(r["task_created_at"]),
+                    "createdAt": _iso_utc(r["task_created_at"]),
                     "sequences": {},
                 }
             seq = r["sequence_name"]
@@ -1358,7 +1386,7 @@ def get_all_tasks_with_processes():
                     "status": r["status"] or "Unknown",
                     "pid": r["cluster_job_id"] or "",
                     "userId": r["username"],
-                    "createdAt": str(r["created_at"]),
+                    "createdAt": _iso_utc(r["created_at"]),
                     "imagePath": r["sif_file"] or "",
                     "outFile": r["out_file"] or "",
                     "errFile": r["err_file"] or "",
