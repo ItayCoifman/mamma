@@ -3,14 +3,21 @@
 Three acquisition modes, picked per asset by its source descriptor:
 
   PublicSource — single HTTPS GET, no credentials.
-  MpiSource    — single HTTPS POST to download.is.tue.mpg.de with a
-                 username+password form body, mirroring the wire format
-                 used by data/download_mamma_*.sh. Credentials arrive in
-                 ONE request body from the browser, are used exactly once
-                 to compose the outbound POST, and are then dropped. They
-                 are never logged, never echoed in any response or error
-                 message, never written to disk, and never passed to a
-                 subprocess (so they cannot leak via /proc/<pid>/cmdline).
+  MpiSource    — a single ``wget`` POST to download.is.tue.mpg.de with a
+                 username+password form body, mirroring data/download_mamma_*.sh
+                 byte-for-byte. We shell out to ``wget`` (not urllib) on
+                 purpose: the download.php endpoint serves the file body to
+                 wget but returns its HTML login page to urllib requests —
+                 even ones that copy wget's header values — because it keys
+                 off lower-level request traits (header order, HTTP/keep-alive
+                 behaviour) that urllib cannot reproduce. The CLI scripts use
+                 wget for the same reason, so this keeps both paths identical.
+                 Credentials arrive in ONE request body from the browser and
+                 are handed to wget via ``--post-file`` pointing at a 0600
+                 temp file that is deleted immediately after; they are never
+                 placed on wget's command line (so they cannot leak via
+                 /proc/<pid>/cmdline), never logged, and never echoed in any
+                 response or error message.
   ManualSource — short documented steps the user has to follow themselves.
 
 Both background-downloading modes stream into ``<dest>.part`` and
@@ -32,6 +39,9 @@ import http.cookiejar
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -67,6 +77,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # body, so the destination must be trustworthy.
 _ALLOWED_HOSTS = frozenset({
     "download.is.tue.mpg.de",
+    "mamma.is.tue.mpg.de",
+    "smpl-x.is.tue.mpg.de",
     "dl.fbaipublicfiles.com",
     "github.com",
     "github-releases.githubusercontent.com",  # GH release redirect target
@@ -80,6 +92,24 @@ _ALLOWED_HOSTS = frozenset({
 })
 
 _MPI_DOWNLOAD_URL = "https://download.is.tue.mpg.de/download.php"
+
+# One friendly, consistent message for every "the download server won't
+# give us the file right now" situation. The server signals this several
+# ways (an HTML landing page (200), a 403, or a 429), but they all mean
+# the same thing to a user, so they share one message. Kept deliberately
+# vague on cause (we don't claim retrying makes it worse) and reassuring
+# about credentials (sign-in is verified separately against login.php).
+# Nudges the user to try the file directly on the project website: it's a
+# quick sanity check that the problem is the server limiting their IP, and
+# a browser download is a fallback if it happens to work there.
+_DOWNLOAD_LIMIT_MSG = (
+    "We couldn't fetch this file from the download server right now. It "
+    "looks like the server is temporarily limiting downloads from your IP. "
+    "This usually clears within about 24 hours, so please try again later. "
+    "As a double-check, try signing in on the project website and "
+    "downloading the file directly from the website. "
+    "If downloading still fails, the limit is on the server, not your account."
+)
 
 
 # ─── Asset descriptors ───────────────────────────────────────────────────
@@ -264,6 +294,21 @@ def _find_asset(asset_id: str) -> Optional[DataAsset]:
     return next((a for a in ASSETS if a.id == asset_id), None)
 
 
+def _smallest_mpi_asset(domain: str) -> Optional[DataAsset]:
+    """Return the smallest MpiSource asset whose source domain matches.
+
+    Used by the credential-verify route: probing the smallest file in a
+    domain keeps the check cheap (the worker only reads the first chunk
+    anyway, but a small file also minimises wasted server work)."""
+    candidates = [
+        a for a in ASSETS
+        if isinstance(a.source, MpiSource) and a.source.domain == domain
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda a: a.size_hint_mb or float("inf"))
+
+
 # ─── Job table ───────────────────────────────────────────────────────────
 
 # In-memory job table. Each entry holds progress + state for one download.
@@ -333,18 +378,14 @@ def _stream_to_disk(resp, dest_tmp: Path, job_id: str) -> None:
                 break
             if first:
                 if _is_html_error(chunk):
-                    # The MPI download endpoint returns its HTML landing
-                    # page (200 OK + text/html) for several distinct
-                    # error states: wrong sfile, ACL miss, soft rate
-                    # limit, or a stale session. Listing them all beats
-                    # guessing "auth failed" and frustrating users with
-                    # correct credentials.
-                    raise RuntimeError(
-                        "Server returned an HTML landing page instead of "
-                        "the file body. Common causes: the sfile is wrong, "
-                        "or the server is rate-limiting requests. Wait a "
-                        "minute and retry."
-                    )
+                    # The MPI download endpoint serves an HTML landing page
+                    # (200 OK + text/html) instead of the file when it's
+                    # limiting downloads from this IP — the same situation a
+                    # 403/429 signals on other requests. Surface the one
+                    # shared, friendly message so every failure path reads
+                    # the same. Sign-in credentials are verified separately
+                    # (login.php), so this is not a "wrong password" case.
+                    raise RuntimeError(_DOWNLOAD_LIMIT_MSG)
                 first = False
             f.write(chunk)
             downloaded += len(chunk)
@@ -396,37 +437,32 @@ def _safe_error(exc: BaseException) -> str:
         # is wrong" — point users at their credentials in that case only.
         if exc.code == 401:
             return (
-                "HTTP 401 Unauthorized — username or password is wrong. "
-                "Re-check the credentials you signed in with."
+                "Those credentials weren't accepted. Please double-check the "
+                "username (the email you registered with) and password."
             )
-        # 403 is ambiguous on this server: the same status comes back for
-        # invalid creds, missing per-file access, IP rate limiting, and
-        # the wrong wire format. Spell out the possibilities instead of
-        # forcing a guess.
-        if exc.code == 403:
-            return (
-                "HTTP 403 Forbidden — credentials may be wrong, or the server "
-                "may be rate-limiting you. Wait a minute and retry."
-            )
-        # 429 is the explicit rate-limit code. Some servers also send
-        # Retry-After; surface it when present.
-        if exc.code == 429:
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
-            if retry_after:
-                return f"HTTP 429 Too Many Requests — server asks you to retry after {retry_after}s."
-            return "HTTP 429 Too Many Requests — server is rate-limiting. Retry in a minute."
+        # 403 and 429 are both the download server limiting this IP — NOT
+        # an auth failure (a wrong password returns 401, above). Use the one
+        # shared, friendly message so every limit path reads the same.
+        if exc.code in (403, 429):
+            return _DOWNLOAD_LIMIT_MSG
         # 5xx covers server-side faults; never the user's problem.
         if 500 <= exc.code < 600:
             return (
-                f"HTTP {exc.code} server-side error — not a client problem. "
-                "Retry; if it persists, the MAMMA download server may be down."
+                "The download server hit a problem on its end. This isn't "
+                "something on your side — please try again in a little while."
             )
-        return f"Server returned HTTP {exc.code} {exc.reason or ''}.".rstrip()
+        return (
+            "The download server returned an unexpected response "
+            f"(HTTP {exc.code}). Please try again later."
+        )
     if isinstance(exc, urllib.error.URLError):
-        return "Network error: could not reach the download server."
+        return (
+            "We couldn't reach the download server. Please check your "
+            "internet connection and try again."
+        )
     if isinstance(exc, RuntimeError):
         return str(exc)
-    return f"{type(exc).__name__}: download failed."
+    return "The download didn't complete. Please try again."
 
 
 # ─── Workers ─────────────────────────────────────────────────────────────
@@ -535,30 +571,164 @@ def _run_public(asset: DataAsset, job_id: str) -> None:
         logger.warning("Public download failed: asset=%s (%s)", asset.id, type(exc).__name__)
 
 
-def _run_mpi(asset: DataAsset, username: str, password: str, job_id: str) -> None:
-    """One-shot MPI auth + download.
+def _wget_error_message(returncode: int, stderr: bytes) -> str:
+    """Map a failed wget run to a user-safe message (never echoes creds).
 
-    Wire format (matches data/download_mamma_*.sh, which is the canonical
-    reference; the server 500s on shapes that don't match):
+    wget prints the HTTP status it choked on as e.g. ``ERROR 403:
+    Forbidden.`` on stderr; parse that so 401 (bad creds) and 403/429
+    (server limiting the IP) read differently — same distinction the
+    urllib path drew via :func:`_safe_error`."""
+    text = stderr.decode("utf-8", "replace")
+    m = re.search(r"ERROR\s+(\d{3})", text)
+    if m:
+        code = int(m.group(1))
+        if code == 401:
+            return (
+                "Those credentials weren't accepted. Please double-check the "
+                "username (the email you registered with) and password."
+            )
+        if code in (403, 429):
+            return _DOWNLOAD_LIMIT_MSG
+        if 500 <= code < 600:
+            return (
+                "The download server hit a problem on its end. This isn't "
+                "something on your side — please try again in a little while."
+            )
+        return (
+            "The download server returned an unexpected response "
+            f"(HTTP {code}). Please try again later."
+        )
+    # wget exit code 4 == network failure (DNS, connection refused, …).
+    if returncode == 4:
+        return (
+            "We couldn't reach the download server. Please check your "
+            "internet connection and try again."
+        )
+    return "The download didn't complete. Please try again."
+
+
+def _wget_post(
+    request_url: str, form_body: bytes, dest_tmp: Path,
+    on_bytes: Optional[callable] = None,
+) -> None:
+    """POST ``form_body`` to ``request_url`` with wget, saving to ``dest_tmp``.
+
+    wget is the only client download.php reliably serves (see module
+    docstring), so both the data-readiness *and* the dataset downloaders
+    funnel through here. ``form_body`` (the URL-encoded
+    ``username=…&password=…``) is written to a 0600 temp file passed via
+    ``--post-file`` so the credentials never appear on wget's command line;
+    the temp file is removed in ``finally``. ``on_bytes`` (if given) is
+    called with the running byte count so each caller can map progress onto
+    its own job schema. Raises ``RuntimeError`` (user-safe) on any failure."""
+    wget = shutil.which("wget")
+    if wget is None:
+        raise RuntimeError(
+            "wget is required to download from the MPI server but wasn't "
+            "found on PATH. It ships with the conda env — install it with "
+            "`conda install -n mamma wget` and retry."
+        )
+
+    # Credentials -> 0600 temp file alongside the .part (same filesystem),
+    # removed as soon as the transfer ends.
+    fd, cred_name = tempfile.mkstemp(prefix="._mpi_post_", dir=str(dest_tmp.parent))
+    cred_path = Path(cred_name)
+    try:
+        # mkstemp already creates the file 0600 on POSIX; tighten explicitly
+        # too, but best-effort — os.fchmod is absent on Windows.
+        try:
+            os.fchmod(fd, 0o600)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(fd, "wb") as cf:
+            cf.write(form_body)
+
+        # `-O` truncates any stale .part, so a previous HTML login page can't
+        # be appended to. No --no-check-certificate: download.is.tue.mpg.de
+        # presents a valid cert, and creds ride in the POST body.
+        cmd = [
+            wget,
+            "--post-file", str(cred_path),
+            "--tries=3", "--timeout=60", "-q",
+            "-O", str(dest_tmp),
+            request_url,
+        ]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        # Poll the growing .part for a live progress estimate.
+        while proc.poll() is None:
+            if on_bytes is not None:
+                try:
+                    on_bytes(dest_tmp.stat().st_size)
+                except OSError:
+                    pass
+            time.sleep(0.5)
+        stderr = b""
+        if proc.stderr is not None:
+            try:
+                stderr = proc.stderr.read() or b""
+            finally:
+                proc.stderr.close()
+        if on_bytes is not None:
+            try:
+                on_bytes(dest_tmp.stat().st_size)
+            except OSError:
+                pass
+
+        if proc.returncode != 0:
+            raise RuntimeError(_wget_error_message(proc.returncode, stderr))
+
+        # wget exits 0 on a 200 even when the body is download.php's own HTML
+        # login page (credentials not accepted / server stonewalling). Sniff
+        # the first bytes and reject — mirrors the urllib path's check.
+        try:
+            with open(dest_tmp, "rb") as fh:
+                head = fh.read(256)
+        except OSError:
+            head = b""
+        if not head or _is_html_error(head):
+            raise RuntimeError(_DOWNLOAD_LIMIT_MSG)
+    finally:
+        cred_path.unlink(missing_ok=True)
+
+
+def _wget_to_disk(
+    request_url: str, form_body: bytes, dest_tmp: Path, job_id: str,
+    size_hint_mb: int = 0,
+) -> None:
+    """data-readiness adapter over :func:`_wget_post` — maps the running
+    byte count onto this panel's ``bytes_downloaded``/``bytes_total`` job
+    fields (the dataset downloader wraps the same core differently)."""
+    if size_hint_mb:
+        _update_job(job_id, bytes_total=size_hint_mb * 1024 * 1024)
+    _wget_post(
+        request_url, form_body, dest_tmp,
+        on_bytes=lambda n: _update_job(job_id, bytes_downloaded=n),
+    )
+
+
+def _run_mpi(asset: DataAsset, username: str, password: str, job_id: str) -> None:
+    """One-shot MPI auth + download, via wget.
+
+    download.php serves the file body to wget but returns its HTML login
+    page to urllib — even to urllib calls that copy wget's header values —
+    so we shell out to wget, the same client the canonical
+    data/download_mamma_*.sh scripts use. See module docstring.
+
+    Wire format (matches data/download_mamma_*.sh):
 
       URL : https://download.is.tue.mpg.de/download.php
               ?domain=<domain>&resume=1&sfile=<sfile>
       POST: username=<u>&password=<p>      ← creds only
 
-    Putting the *non-secret* request descriptors (sfile/domain/resume) in
-    the URL keeps the wire shape identical to the shell downloaders.
-    Credentials still go only in the POST body so they don't surface in
-    URL logs, /proc/<pid>/cmdline, browser history, or any HTTP referer
-    header that some downstream tool might emit.
-
-    Security contract (unchanged):
-      * `username` and `password` are local parameters only.
-      * They are used to build a single URL-encoded form body, sent in
-        one HTTPS POST to download.is.tue.mpg.de.
-      * They are then deleted from this frame; nothing else in this
-        module retains them.
-      * They are never written to disk, logged, echoed in any response,
-        or passed to a subprocess.
+    Security contract:
+      * `username`/`password` are local parameters, used once to build a
+        single URL-encoded form body.
+      * That body is written to a 0600 temp file handed to wget via
+        --post-file (never on argv → never in /proc/<pid>/cmdline), and the
+        temp file is deleted immediately after the transfer.
+      * Credentials are never logged or echoed in any response/error.
     """
     src: MpiSource = asset.source  # type: ignore[assignment]
     dest_path = (_REPO_ROOT / asset.rel_path).resolve()
@@ -598,25 +768,7 @@ def _run_mpi(asset: DataAsset, username: str, password: str, job_id: str) -> Non
         # assets it's data/. Mirrors the `mkdir -p` the shell downloaders do
         # and the dest.parent.mkdir() that _run_public/_run_gdrive already do.
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        # Match wget's request fingerprint exactly. The MPI download.php
-        # endpoint serves the file body for wget but returns an HTML
-        # landing page for "vanilla" urllib calls — observed difference
-        # is the header set wget sends by default. Spoofing the
-        # User-Agent alone is not enough; the full quad below is what
-        # makes the server treat us as a download client.
-        req = urllib.request.Request(
-            request_url, data=form_body, method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Wget/1.21.4",
-                "Accept": "*/*",
-                "Accept-Encoding": "identity",
-                "Connection": "Keep-Alive",
-            },
-        )
-        # The body is sent on the wire and the response is streamed.
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            _stream_to_disk(resp, tmp, job_id)
+        _wget_to_disk(request_url, form_body, tmp, job_id, asset.size_hint_mb)
         if src.extract and zip_path is not None:
             _atomic_install_file(tmp, zip_path)
             _update_job(job_id, state="extracting")
@@ -648,6 +800,90 @@ def _run_mpi(asset: DataAsset, username: str, password: str, job_id: str) -> Non
         # Best-effort clear of the form body. CPython may still hold the
         # bytes in the garbage collector until collection; this is the
         # tightest we can reasonably get without an FFI dance.
+        del form_body
+
+
+def _login_url_for(src: MpiSource) -> str:
+    """Derive a domain's website LOGIN url from its registration url.
+
+    Every MPI project site (mamma.is.tue.mpg.de, smpl-x.is.tue.mpg.de, …)
+    serves a ``login.php`` next to its ``register.php``. Deriving the login
+    url from the registry's ``register_url`` keeps this data-driven — no
+    second hard-coded host table to drift out of sync.
+    """
+    return src.register_url.replace("register.php", "login.php")
+
+
+def _verify_mpi_credentials(asset: DataAsset, username: str, password: str) -> dict:
+    """Verify MPI credentials against the project site's LOGIN endpoint.
+
+    This deliberately does NOT touch ``download.php``. That endpoint is the
+    rate-limited one: a wrong password there returns 401, but once an IP
+    trips the (~24-hour) download block every request returns an opaque 403
+    regardless of whether the credentials are valid — so it can neither
+    verify reliably nor be probed safely (verifying could itself get the
+    user blocked).
+
+    ``login.php`` is a plain, non-rate-limited auth check. Observed wire
+    behaviour (confirmed live 2026-06-10):
+
+      * correct credentials  -> 302 redirect away from the login page
+      * wrong credentials     -> 200 that re-renders the login form
+
+    So a 3xx is the unambiguous "valid" signal and a 200 is "wrong username
+    or password" — no rate-limit hedging needed, because logging in is not
+    rate-limited. Returns ``{"valid": bool, "detail": str}``. Credentials
+    live only in this frame's POST body.
+    """
+    src: MpiSource = asset.source  # type: ignore[assignment]
+    login_url = _login_url_for(src)
+    form_body = urllib.parse.urlencode(
+        {"username": username, "password": password, "commit": "Log in"}
+    ).encode("utf-8")
+    del username, password
+
+    # Don't follow the redirect — the 3xx itself is the success signal.
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+        _NoRedirect,
+    )
+    try:
+        _check_url(login_url)
+        # Prime a PHP session cookie (the login form sets PHPSESSID on GET;
+        # the POST is accepted within that session).
+        try:
+            opener.open(
+                urllib.request.Request(login_url, headers={"User-Agent": "Mozilla/5.0"}),
+                timeout=30,
+            ).read()
+        except Exception:  # noqa: BLE001 — priming is best-effort
+            pass
+        req = urllib.request.Request(
+            login_url, data=form_body, method="POST",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        try:
+            resp = opener.open(req, timeout=30)
+            code = resp.getcode()
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+        if 300 <= code < 400:
+            return {"valid": True, "detail": "Credentials accepted."}
+        site = src.register_url.replace("register.php", "")
+        return {"valid": False, "detail": (
+            "Those credentials weren't accepted. Please double-check the "
+            f"username (the email you registered with at {site}) and password."
+        )}
+    except Exception as exc:  # noqa: BLE001 — surface a safe message to the UI
+        return {"valid": False, "detail": _safe_error(exc)}
+    finally:
         del form_body
 
 
@@ -708,6 +944,24 @@ def register_routes(app: Flask) -> None:
         ).start()
         # Don't echo the username back. The frontend already has it.
         return jsonify({"job_id": job_id})
+
+    @app.post("/api/data/readiness/verify-mpi")
+    def _verify_mpi():
+        # Credential check for a sign-in domain (mamma/smplx): authenticate
+        # against the project site's login.php (NOT the rate-limited
+        # download.php). Any asset in the domain supplies the site url, so
+        # we reuse _smallest_mpi_asset. Creds live only in this frame.
+        body = request.get_json(silent=True) or {}
+        domain = str(body.get("domain") or "")
+        username = str(body.get("username") or "")
+        password = str(body.get("password") or "")
+        if not username or not password:
+            return jsonify({"error": "username and password are required"}), 400
+        asset = _smallest_mpi_asset(domain)
+        if asset is None:
+            return jsonify({"error": f"no MPI asset for domain '{domain}'"}), 404
+        result = _verify_mpi_credentials(asset, username, password)
+        return jsonify(result)
 
     @app.get("/api/data/readiness/job/<job_id>")
     def _job(job_id):
