@@ -10,6 +10,7 @@ import { HtmlViewer } from './HtmlViewer';
 import { NpzViewer } from './NpzViewer';
 import { StepOutputs } from './StepOutputs';
 import { formatTaskId } from './shared/formatTaskId';
+import { formatRelativeTime } from './shared/relativeTime';
 
 /** Shape returned by /api/tasks/history for one run's processes. */
 interface HistoryProcess {
@@ -110,26 +111,6 @@ function aggregateTaskStatus(perRow: RowStatus[]): RowStatus {
   const set = new Set(perRow);
   for (const s of priority) if (set.has(s)) return s;
   return 'Pending';
-}
-
-const RTF = typeof Intl !== 'undefined' && (Intl as any).RelativeTimeFormat
-  ? new (Intl as any).RelativeTimeFormat('en', { numeric: 'auto' })
-  : null;
-
-function formatRelativeTime(iso?: string): string {
-  if (!iso) return '';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '';
-  const diffMs = t - Date.now();
-  const absMin = Math.abs(diffMs) / 60_000;
-  const absHr = absMin / 60;
-  const absDay = absHr / 24;
-  if (!RTF) return new Date(t).toLocaleDateString();
-  if (absMin < 1) return 'just now';
-  if (absMin < 60) return RTF.format(Math.round(diffMs / 60_000), 'minute');
-  if (absHr < 24) return RTF.format(Math.round(diffMs / 3_600_000), 'hour');
-  if (absDay < 30) return RTF.format(Math.round(diffMs / 86_400_000), 'day');
-  return new Date(t).toLocaleDateString();
 }
 
 function truncate(s: string, n: number): string {
