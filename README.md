@@ -10,7 +10,7 @@ Hanz Cuevas Velasquez<sup>1\*</sup>, Anastasios Yiannakidis<sup>1\*</sup>, Soyon
 
 ![teaser.png](docs/teaser.png)
 
-**[CVPR 2026 Oral]** | [arXiv](https://arxiv.org/abs/2506.13040) | [Project Page](https://mamma.is.tue.mpg.de/) | [Datasets](https://mamma.is.tue.mpg.de/download.php)
+**[CVPR 2026 Oral]** | [Paper](https://openaccess.thecvf.com/content/CVPR2026/html/Velasquez_MAMMA_Markerless_Accurate_Multi-person_Motion_Acquisition_CVPR_2026_paper.html) | [arXiv](https://arxiv.org/abs/2506.13040) | [Project Page](https://mamma.is.tue.mpg.de/) | [Datasets](https://mamma.is.tue.mpg.de/download.php)
 
 </div>
 
