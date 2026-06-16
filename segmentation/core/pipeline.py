@@ -460,6 +460,27 @@ class SegmentMultipleFrames:
         try:
             state = self.predictor.init_state(video_path=video_dir)
             return state, video_dir
+        except torch.cuda.OutOfMemoryError as oom:
+            # Long / high-res / many-camera clips can't fit all decoded frames on
+            # the GPU at once (SAM2 loads the whole video into VRAM by default).
+            # Retry with CPU offload: frames and per-frame state live on the host
+            # and stream to the GPU as needed — bounded GPU memory, identical
+            # masks (offload changes only where tensors live), somewhat slower.
+            # Only triggered on an actual OOM, so normal runs are unaffected.
+            self._log_warn(
+                f"[{context_name}] SAM init_state hit CUDA OOM; retrying with CPU "
+                f"offload (offload_video_to_cpu / offload_state_to_cpu). {oom}"
+            )
+            torch.cuda.empty_cache()
+            try:
+                state = self.predictor.init_state(
+                    video_path=video_dir,
+                    offload_video_to_cpu=True,
+                    offload_state_to_cpu=True,
+                )
+                return state, video_dir
+            except Exception as exc:
+                init_error = exc
         except Exception as exc:
             init_error = exc
 
