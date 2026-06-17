@@ -236,21 +236,80 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
     return out_path
 
 
+_BLENDER_FORMATS = ("fbx", "abc", "bvh", "usd")  # need Blender; npz is pure-Python
+
+
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _find_blender(explicit=None):
+    """Locate a Blender binary: --blender-bin / MAMMA_BLENDER_BIN / the portable
+    download under data/blender/ / system `blender`. Returns None if none found."""
+    import glob as _glob
+    import shutil
+    cands = [explicit, os.environ.get("MAMMA_BLENDER_BIN")]
+    cands += sorted(_glob.glob(os.path.join(_repo_root(), "data", "blender", "blender-*", "blender")))
+    cands.append(shutil.which("blender"))
+    for c in cands:
+        if c and os.path.exists(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _blender_export(blender_bin, addon_dir, npz_path, out_prefix, formats, fps, fbx_target):
+    """Drive the portable Blender headless (client of the add-on) to write the
+    requested rigged formats from the add-on npz."""
+    import subprocess
+    script = os.path.join(_repo_root(), "scripts", "blender_smplx_export.py")
+    cmd = [blender_bin, "--background", "--python", script, "--",
+           "--addon-dir", addon_dir, "--npz", npz_path, "--out-prefix", out_prefix,
+           "--formats", ",".join(formats), "--fps", str(int(fps)), "--fbx-target", fbx_target]
+    log.info("  blender export [%s] -> %s.*", ",".join(formats), out_prefix)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        log.error("blender export failed (rc=%s):\n%s", r.returncode, (r.stderr or r.stdout)[-2000:])
+        raise RuntimeError(f"blender export failed for {os.path.basename(npz_path)}")
+    return [f"{out_prefix}.{f}" for f in formats]
+
+
 def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="z",
-                    ma_cap_dir=None, fps=None, validate=True):
+                    ma_cap_dir=None, fps=None, validate=True,
+                    formats=("npz",), blender_bin=None, addon_dir=None, fbx_target="UNITY"):
     seq_dir = os.path.join(ma_3d_dir, seq_name)
     params = sorted(glob.glob(os.path.join(seq_dir, "smplx_params_body_id-*.npz")))
     if not params:
         raise FileNotFoundError(f"no smplx_params_body_id-*.npz under {seq_dir}")
     fps = _resolve_fps(ma_cap_dir, seq_name, fps)
+
+    # Resolve Blender once (graceful: fall back to npz-only if it / the add-on
+    # is missing — the npz path never needs Blender).
+    blender_fmts = [f for f in formats if f in _BLENDER_FORMATS]
+    bin_ = None
+    if blender_fmts:
+        addon_dir = addon_dir or os.path.join(_repo_root(), "data", "blender_addon")
+        bin_ = _find_blender(blender_bin)
+        if bin_ is None:
+            log.warning("Blender not found for %s — writing npz only. Run "
+                        "data/download_blender.sh or set MAMMA_BLENDER_BIN.", blender_fmts)
+            blender_fmts = []
+        elif not os.path.isdir(os.path.join(addon_dir, "smplx_blender_addon")):
+            log.warning("SMPL-X add-on not found under %s — writing npz only. Run "
+                        "data/download_smplx_blender_addon.sh.", addon_dir)
+            blender_fmts = []
+
     out = []
     for p in params:
         m = re.search(r"body_id-(\d+)", os.path.basename(p))
         bid = m.group(1) if m else "00"
         verts = os.path.join(seq_dir, f"verts_joints_body_id-{bid}.npz")
-        out_path = os.path.join(out_dir, f"{seq_name}_body-{bid}_smplx.npz")
-        out.append(export_person(p, model_dir, up_axis, fps, out_path,
+        npz_out = os.path.join(out_dir, f"{seq_name}_body-{bid}_smplx.npz")
+        out.append(export_person(p, model_dir, up_axis, fps, npz_out,
                                  verts_path=verts, validate=validate))
+        if blender_fmts:
+            out += _blender_export(bin_, addon_dir, npz_out,
+                                   os.path.join(out_dir, f"{seq_name}_body-{bid}"),
+                                   blender_fmts, fps, fbx_target)
     return out
 
 
@@ -269,6 +328,18 @@ def main(argv=None):
                     help="ma_cap output root, to read fps from <seq>/gt/global.npz.")
     ap.add_argument("--fps", type=int, default=None,
                     help="Override mocap_frame_rate (else read from ma_cap, else 30).")
+    ap.add_argument("--formats", default="npz",
+                    help="Comma list: npz,fbx,abc,bvh,usd. npz is always written "
+                         "(pure-Python); fbx/abc/bvh/usd need Blender (auto-detected; "
+                         "falls back to npz-only if absent). Default: npz.")
+    ap.add_argument("--blender-bin", "--blender_bin", default=None,
+                    help="Blender executable (else MAMMA_BLENDER_BIN / data/blender/ / PATH).")
+    ap.add_argument("--addon-dir", "--addon_dir", default=None,
+                    help="Dir containing the smplx_blender_addon package "
+                         "(default data/blender_addon).")
+    ap.add_argument("--fbx-target", "--fbx_target", default="UNITY",
+                    choices=["UNITY", "UNREAL"],
+                    help="Engine preset for FBX (the add-on offers Unity/Unreal only).")
     ap.add_argument("--no-validate", action="store_true",
                     help="Skip the round-trip vertex check (not recommended).")
     ap.add_argument("-v", "--verbose", action="count", default=0)
@@ -276,10 +347,12 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO if args.verbose == 0 else logging.DEBUG,
                         format="%(levelname)s %(name)s: %(message)s")
 
+    formats = tuple(f.strip().lower() for f in args.formats.split(",") if f.strip())
     outs = export_sequence(
         args.ma_3d_dir, args.seq_name, args.smplx_models, args.out_dir,
         up_axis=args.up_axis, ma_cap_dir=args.ma_cap_dir, fps=args.fps,
-        validate=not args.no_validate,
+        validate=not args.no_validate, formats=formats,
+        blender_bin=args.blender_bin, addon_dir=args.addon_dir, fbx_target=args.fbx_target,
     )
     print(f"exported {len(outs)} file(s):")
     for o in outs:
