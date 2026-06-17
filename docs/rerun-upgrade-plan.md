@@ -229,6 +229,24 @@ needs an ffmpeg binary, and that's already covered with **no install change**:
 So: declare nothing new, change nothing in INSTALL; an optional one-line doc note
 ("video backdrop uses the bundled ffmpeg") is the only thing worth adding.
 
+### Browser (WebCodecs) black-frame fix — color signalling
+
+Symptom: backdrops play in the **native** rerun viewer but are **black in the
+browser**; the browser's "decoder output format" reads `Rgba8Unorm` while native
+shows YUV+coefficients. Cause: the rerun **web** viewer decodes via the browser's
+**WebCodecs**, which is strict — our re-encode inherited the source's odd matrix
+(`bt470bg`) with **`unknown` transfer/primaries**; native decoders tolerate that,
+WebCodecs renders black ([rerun Video docs](https://rerun.io/docs/reference/video)).
+
+Fix is entirely on our (re-encode) side — **no need to fix source files**: emit
+fully-specified **BT.709 limited-range yuv420p** (`out_color_matrix=bt709` +
+`-colorspace/-color_primaries/-color_trc bt709 -color_range tv`), the **Main**
+profile (most universally WebCodecs-decodable), and `+faststart`. Verified the
+output now tags `bt709/bt709/bt709` with no `unknown` fields (was
+`bt470bg/unknown/unknown`). Cache key carries an `_ENCODE_RECIPE` version so the
+fix regenerates stale re-encodes. Also: **Chrome/Chromium recommended** — Firefox
+has known WebCodecs H.264 bugs.
+
 ## Phased plan
 
 - **Phase 0 — Pin alignment (correctness fix, no feature change).** Bump the

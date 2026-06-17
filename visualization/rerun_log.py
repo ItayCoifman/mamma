@@ -138,8 +138,12 @@ def _ensure_h264(src_path, width, height, frame_start, frame_end, crf):
         mtime = int(os.path.getmtime(src_path))
     except OSError:
         mtime = 0
+    # Bump _ENCODE_RECIPE whenever the ffmpeg recipe changes so stale cached
+    # re-encodes are regenerated rather than silently reused.
+    _ENCODE_RECIPE = "v2-bt709-main"
     key = hashlib.md5(
-        f"{os.path.abspath(src_path)}:{mtime}:{width}x{height}:{fs}:{fe}:{crf}".encode()
+        f"{os.path.abspath(src_path)}:{mtime}:{width}x{height}:{fs}:{fe}:"
+        f"{crf}:{_ENCODE_RECIPE}".encode()
     ).hexdigest()[:12]
     out = os.path.join(cache, f"{key}.mp4")
     if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -150,12 +154,23 @@ def _ensure_h264(src_path, width, height, frame_start, frame_end, crf):
         end_expr = f":end_frame={fe}" if fe is not None else ""
         vf.append(f"trim=start_frame={fs}{end_expr}")
         vf.append("setpts=PTS-STARTPTS")
-    vf.append(f"scale={int(width)}:{int(height)}")
+    # Convert the source (whatever its matrix is) to BT.709 limited-range
+    # yuv420p, then tag it fully below. The browser's WebCodecs decoder renders
+    # BLACK when the stream carries an unusual matrix (e.g. bt470bg) or 'unknown'
+    # transfer/primaries — native decoders tolerate it, WebCodecs does not. So we
+    # normalise + fully specify the colour signalling for cross-browser playback.
+    vf.append(f"scale={int(width)}:{int(height)}:out_color_matrix=bt709")
+    vf.append("format=yuv420p")
     tmp = out + ".tmp.mp4"
     subprocess.run(
         [_ffmpeg_bin(), "-y", "-i", src_path, "-vf", ",".join(vf), "-an",
-         "-c:v", "libx264", "-preset", "medium", "-crf", str(int(crf)),
-         "-bf", "0", "-pix_fmt", "yuv420p", tmp],
+         # 'main' profile is the most universally WebCodecs-decodable; bf=0 keeps
+         # access units in display order for 1:1 timeline mapping.
+         "-c:v", "libx264", "-profile:v", "main", "-preset", "medium",
+         "-crf", str(int(crf)), "-bf", "0", "-pix_fmt", "yuv420p",
+         "-colorspace", "bt709", "-color_primaries", "bt709",
+         "-color_trc", "bt709", "-color_range", "tv",
+         "-movflags", "+faststart", tmp],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True,
     )
     os.replace(tmp, out)
