@@ -261,6 +261,11 @@ _register_data_readiness(app)
 from dataset_downloader import register_routes as _register_dataset_downloader  # noqa: E402
 _register_dataset_downloader(app)
 
+# Exporter tab (SMPL-X -> npz/FBX/ABC/BVH/USD). Self-contained module:
+# registers /api/exporter/* routes (readiness, Blender/add-on downloads, export).
+from exporter import register_routes as _register_exporter  # noqa: E402
+_register_exporter(app)
+
 
 # ---------------------------------------------------------------------------
 # Task queue + coordinator
