@@ -194,10 +194,33 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
     poses[:, _RHAND] += rhm
 
     # --- rotate global_orient + trans: capture up-axis -> AMASS Y-up ---
+    # global_orient rotates the body about the ROOT joint, so a whole-body rotation
+    # R needs translation offset (R - I) @ J0, where J0 is the (pose-independent,
+    # betas-dependent) rest pelvis. Omitting it rotates about the wrong pivot — a
+    # fixed ~tens-of-cm error.
+    import torch
+    with torch.no_grad():
+        J0 = chosen_model(
+            betas=torch.tensor(np.tile(betas_row, (F, 1)), dtype=torch.float32)
+        ).joints[0, 0].cpu().numpy().astype(np.float64)
     R = _up_axis_rotation(up_axis)
-    go_mat = _rotvec_to_mat(poses[:, _GLOBAL])           # (F,3,3)
-    poses[:, _GLOBAL] = _mat_to_rotvec(R[None] @ go_mat)  # R . global
-    trans = trans @ R.T                                   # R . t per frame
+    go_mat = _rotvec_to_mat(poses[:, _GLOBAL])             # (F,3,3)
+    poses[:, _GLOBAL] = _mat_to_rotvec(R[None] @ go_mat)   # R . global
+    trans = trans @ R.T + (R - np.eye(3)) @ J0            # R . (J0 + t) - J0
+
+    # --- validate the FINAL export end-to-end (bake + rotation together) ---
+    # Run the exported (absolute) poses through a FLAT model; the result must equal
+    # the MAMMA vertices rotated by R. Catches bake/rotation/pivot bugs that the
+    # input-param round-trip above cannot see.
+    if ref is not None:
+        flat_model = chosen_model if chosen_flat else _build_model(model_dir, gender, num_betas, True, F)
+        v_out = _reconstruct_verts(flat_model, poses, betas_row, trans)
+        out_mm = float(np.abs(v_out - ref @ R.T).max() * 1000.0)
+        if out_mm > validate_tol_mm:
+            raise RuntimeError(
+                f"{params_path}: exported npz does not reproduce R@verts "
+                f"({out_mm:.3f} mm > {validate_tol_mm} mm) — bake/rotation bug; refusing to export")
+        log.info("  export round-trip OK: %.3f mm", out_mm)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     np.savez(
