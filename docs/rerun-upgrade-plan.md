@@ -60,6 +60,50 @@ below are **measured on this machine** (RTX 4090 / `mamma` env) unless noted.
 
 > These are projections from the format change; Phase 1 below measures them A/B.
 
+## Measured: VideoStream (H.264) vs per-frame JPEG — is it worth it?
+
+A/B on a real 4K HEVC camera video, downscaled to 1080p display, JPEG q75 (the
+pipeline default) vs high-quality H.264 (libx264 crf 20). JPEG-per-frame bytes =
+the current `.rrd` image payload; H.264 stream bytes = the VideoStream payload.
+
+| frames | JPEG/cam | H264/cam | ratio | scene (4 cam) |
+|---:|---:|---:|---:|---|
+| 30 | 9.9 MB | 0.84 MB | 11.7× | 40 → 3.4 MB |
+| 100 | 32.6 MB | 2.33 MB | 14.0× | 130 → 9.3 MB |
+| 200 | 65.2 MB | 4.38 MB | 14.9× | 261 → 17.5 MB |
+| 426 | 140 MB | 9.20 MB | **15.2×** | **560 → 37 MB** |
+
+- **The win grows with sequence length** (JPEG is linear per frame; H.264 amortizes
+  via inter-frame compression). Extrapolated to 32 cam × 743 frames: JPEG `.rrd`
+  ≈ **~8 GB** (impractical) vs H.264 ≈ **~0.5 GB**.
+- **The robust win is file size → GUI load / storage / shareability, NOT `ma_vis`
+  wall time.** On CPU, x264 encode is ~30% *slower* than JPEG (1.84 s vs 1.40 s /
+  426 f); it only beats JPEG with **NVENC** (what PR #48 uses).
+
+## How PR #48 loads video, and the HEVC compatibility trap
+
+Two ways to put video in rerun:
+
+1. **`rr.AssetVideo`** — log the whole encoded file; the **browser viewer** decodes
+   it. Tiny, but only plays if the browser can decode that codec.
+2. **`rr.VideoStream`** — encode frames yourself and log H.264 samples per frame.
+   **PR #48 uses this**: async **NVENC → H.264** (decode source → re-encode), so it
+   never hands rerun the original file.
+
+**Codec reality (measured):** rerun 0.31.4 *lists* `H264/H265/AV1`, but **SDK support
+≠ web-viewer playback.** In-browser HEVC decode is unreliable (Safari ok; Chrome only
+with OS/hw support; Firefox generally not). **This repo's example videos are HEVC,
+profile `Rext`, 4K** — so loading the *original* files via `AssetVideo` would likely
+**not play in the web viewer** (the "videos not compatible with rerun" symptom). The
+current per-frame-JPEG path avoids this; `VideoStream` avoids it too **because it
+re-encodes to H.264**. The thing to avoid is remuxing the HEVC stream straight in.
+
+| approach | `.rrd` size | plays HEVC source in viewer? | note |
+|---|---|---|---|
+| current: per-frame JPEG | 15× bigger | ✅ always | simplest, huge files |
+| `AssetVideo` (original HEVC) | tiny | ❌ likely not (HEVC Rext) | the trap |
+| `VideoStream` re-encoded H.264 | ~15× smaller | ✅ (H.264 universal) | needs encode + overlay time-sync |
+
 ## Compatibility & impact on current users
 
 - **This repo's current user:** already on 0.31.4 SDK + 0.31.4 viewer + 0.31-format
