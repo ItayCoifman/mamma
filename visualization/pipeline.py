@@ -70,6 +70,9 @@ def run_visualization(
     rerun_image_long_edge: int = 480,
     rerun_image_jpeg_quality: int = 75,
     rerun_image_num_workers: Optional[int] = None,
+    rerun_video: bool = False,
+    rerun_video_long_edge: int = 720,
+    rerun_video_crf: int = 20,
 ) -> Path:
     """Run the full visualization pipeline. Returns the path to ``scene.rrd``.
 
@@ -132,11 +135,17 @@ def run_visualization(
         colors_rgb = _default_palette(max(10, len(motions)))
 
     # ---- Rerun scene log ----------------------------------------------
-    # When --rerun-images is on, image_long_edge drives a per-camera
-    # display scale so Pinhole, 2D landmarks, and the JPEG backdrop all
-    # land on the same downscaled pixel grid. Otherwise we fall back to
-    # the legacy single --rerun-display-scale.
-    image_long_edge = int(rerun_image_long_edge) if rerun_images else None
+    # image_long_edge drives a per-camera display scale so Pinhole, 2D
+    # landmarks, and the backdrop all land on the same downscaled pixel grid.
+    # --rerun-video takes precedence over --rerun-images and uses its own
+    # (higher) long-edge default since H.264 makes resolution cheap. Falls
+    # back to the legacy single --rerun-display-scale when neither is on.
+    if rerun_video:
+        image_long_edge = int(rerun_video_long_edge)
+    elif rerun_images:
+        image_long_edge = int(rerun_image_long_edge)
+    else:
+        image_long_edge = None
     t = time.perf_counter()
     with RerunSceneLogger(
         rrd_path=str(rrd_path),
@@ -158,7 +167,15 @@ def run_visualization(
             logger.log_landmark_projections(cameras, landmarks_by_cam, colors_rgb)
             log.info("logged landmark projections in %.2fs", time.perf_counter() - t)
 
-        if rerun_images:
+        if rerun_video:
+            t = time.perf_counter()
+            logger.log_camera_video_streams(
+                cameras,
+                crf=rerun_video_crf,
+                num_workers=rerun_image_num_workers,
+            )
+            log.info("logged camera video streams in %.2fs", time.perf_counter() - t)
+        elif rerun_images:
             t = time.perf_counter()
             logger.log_camera_image_streams(
                 cameras,

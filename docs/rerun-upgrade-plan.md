@@ -188,6 +188,29 @@ estimate; the gap is fixed `.rrd` overhead). Alignment is correct **by
 construction** — same frame count (no drops, `bf=0`) and identical frame→time
 mapping. Final *visual* confirmation (probe dot glides in lock-step) is a GUI check.
 
+### Phase 1 integration (shipped on `rerun-upgrade`) + re-encode cost
+
+Wired `--rerun-video` / `--rerun-video-long-edge 720` / `--rerun-video-crf 20`
+through `visualization/cli.py` → `pipeline.py` → `rerun_log.py`
+(`log_camera_video_streams` + `_ensure_h264`). Takes precedence over
+`--rerun-images`; reachable from the GUI (its entry `run_ma_vis.py` shares the
+`cli.py` parser, so the flag auto-appears in the flag catalogue).
+
+**Re-encode is *faster* than the JPEG path it replaces** (counter to the "resize
+32 videos is overkill" worry). Same cameras, 720p, 4 worker threads, full clips:
+
+| backdrop path | 4 cam | →32 cam | when |
+|---|---:|---:|---|
+| video re-encode (decode+resize+H.264, ffmpeg) | 3.5 s | **~28 s** | one-time, **cached** |
+| current JPEG (decode+resize+per-frame encode, cv2) | 17.6 s | ~141 s | **every run** |
+
+~5× faster at *higher* resolution (720 vs JPEG's 480). The `scale` filter rides
+along in the decode→encode pass we must do anyway for HEVC, so resizing is ~free;
+ffmpeg's C pipeline beats cv2's per-frame Python loop. `h264_nvenc` would make it
+near-instant. Default chosen: **720p long-edge** (size cheap; decode safe ×32 —
+4K×32 exceeds the browser 30 fps decode budget + likely the GPU's concurrent-decode
+session cap).
+
 ## Phased plan
 
 - **Phase 0 — Pin alignment (correctness fix, no feature change).** Bump the

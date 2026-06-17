@@ -119,6 +119,25 @@ def _build_parser() -> argparse.ArgumentParser:
                         "Bump on big machines with many cameras; drop to 1 "
                         "for deterministic single-threaded behaviour.")
 
+    p.add_argument("--rerun-video", "--rerun_video", action="store_true",
+                   help="Log each camera's backdrop as a re-encoded H.264 video "
+                        "(rr.AssetVideo) instead of a per-frame JPEG stream. "
+                        "~10-15x smaller .rrd, and viewer-compatible for any "
+                        "source codec (HEVC/AV1 are re-encoded to H.264). Takes "
+                        "precedence over --rerun-images. Re-encode is skipped when "
+                        "the source is already H.264 at the requested framing, and "
+                        "cached otherwise. Default off.")
+    p.add_argument("--rerun-video-long-edge", "--rerun_video_long_edge",
+                   type=int, default=720,
+                   help="Long-edge target (px) for the H.264 backdrop under "
+                        "--rerun-video. Higher than the JPEG default since video "
+                        "is cheap on size; keep modest at high camera counts so "
+                        "the browser can decode all streams. Default 720.")
+    p.add_argument("--rerun-video-crf", "--rerun_video_crf",
+                   type=int, default=20,
+                   help="H.264 quality for the --rerun-video backdrop (libx264 "
+                        "CRF, lower = better/larger). Default 20.")
+
     p.add_argument("--rerun-light", "--rerun_light", action="store_true",
                    help="Skip 2D landmark loading + projection logging.")
     p.add_argument("--skip-overlay", "--skip_overlay", action="store_true",
@@ -243,6 +262,9 @@ def main(argv=None) -> None:
         rerun_image_long_edge=args.rerun_image_long_edge,
         rerun_image_jpeg_quality=args.rerun_image_jpeg_quality,
         rerun_image_num_workers=args.rerun_image_num_workers,
+        rerun_video=args.rerun_video,
+        rerun_video_long_edge=args.rerun_video_long_edge,
+        rerun_video_crf=args.rerun_video_crf,
     )
     print(f"wrote {rrd_path}")
 
