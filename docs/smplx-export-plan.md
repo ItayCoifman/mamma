@@ -129,6 +129,44 @@ pred-model value (`smplx_model[body_id]["neutral"].flat_hand_mean`), and the exp
 **auto-detects** flat_hand_mean by reconstructing the saved `pred_vertices` (the stamp
 is only a first-try hint) — bulletproof across datasets and older files.
 
+## Phase 2 (FBX/ABC) — investigated; approach chosen
+
+**Pure-Python without Blender?** Assessed: **Alembic is doable pure-Python** (it's a
+vertex/geometry cache — write the GPU-computed `pred_vertices` + faces via PyAlembic),
+but **rigged FBX needs a real FBX writer** (Autodesk SDK) or Blender. Since the
+downstream wants a true rigged FBX, we use the **official SMPL-X Blender add-on**.
+
+**The gated zip is self-contained.** `data/smplx_blender_addon-1.0.3-20260511.zip`
+(downloaded from the SMPL-X gated site) contains the add-on code **and** the
+**`smplx_model_lh_20230302.blend`** (344 MB, the **locked-head** model MAMMA uses) +
+hand poses + betas→joints regressors. So no separately-gated model is needed beyond it.
+
+**`bpy` module vs Blender executable.** `bpy` *is* pip-installable for this env
+(py3.11 → `bpy 4.5.x`, satisfies the add-on's `blender_version_min = 4.5.0`), which is
+shipping-friendly — BUT importing `bpy` into the `mamma` env risks colliding with its
+`numpy<2` pins (bpy bundles its own numpy), the exact constraint we protect.
+**Decision: drive the Blender *executable* headless** (its bundled Python → zero
+`mamma`-env impact; Blender 5.1.2 is present and ≥4.5). If pip-only shipping is ever
+required, `bpy` belongs in a *separate* env (the DAG supports per-step `conda_env`),
+never the main one.
+
+**Export mechanism.** The add-on builds the SMPL-X rig+mesh from its `.blend` and
+imports our npz onto it; export is then native:
+`bpy.ops.wm.alembic_export(selected=True, packuv=False, face_sets=True)` and
+`bpy.ops.export_scene.fbx(add_leaf_bones=False, bake_anim_simplify_factor=0, …)`
+(add-on op idnames `object.smplx_export_alembic` / `object.smplx_export_fbx`).
+
+**Isolation.** Load our OWN managed copy of the add-on (extracted from the downloaded
+zip) under `--factory-startup` + a temp `BLENDER_USER_RESOURCES`, so it touches neither
+the `mamma` env NOR the user's global Blender config — a **pre-existing legacy add-on
+install conflicts** with the new extension otherwise.
+
+**Download handling (gated, to implement).** Add `data/download_smplx_blender_addon.sh`
+(SMPL-X login, mirroring `download_smplx_locked_head.sh`) for
+`download.is.tue.mpg.de/download.php?domain=smplx&sfile=smplx_blender_addon-1.0.3-20260511.zip`,
+extract add-on + `.blend` to a managed dir, and surface it in the GUI Pipeline-assets
+panel alongside the other gated downloads.
+
 ## Locked decisions
 
 - **Sequencing:** **NPZ first** (pure-Python exporter + round-trip validation), then
