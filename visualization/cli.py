@@ -119,14 +119,17 @@ def _build_parser() -> argparse.ArgumentParser:
                         "Bump on big machines with many cameras; drop to 1 "
                         "for deterministic single-threaded behaviour.")
 
-    p.add_argument("--rerun-video", "--rerun_video", action="store_true",
+    p.add_argument("--rerun-video", "--rerun_video",
+                   action=argparse.BooleanOptionalAction, default=True,
                    help="Log each camera's backdrop as a re-encoded H.264 video "
                         "(rr.AssetVideo) instead of a per-frame JPEG stream. "
                         "~10-15x smaller .rrd, and viewer-compatible for any "
-                        "source codec (HEVC/AV1 are re-encoded to H.264). Takes "
-                        "precedence over --rerun-images. Re-encode is skipped when "
+                        "source codec (HEVC/AV1 are re-encoded to H.264). **On by "
+                        "default**; use --no-rerun-video for the legacy per-frame "
+                        "JPEG backdrop (--rerun-images). Re-encode is skipped when "
                         "the source is already H.264 at the requested framing, and "
-                        "cached otherwise. Default off.")
+                        "cached otherwise. Needs an ffmpeg binary (system or the "
+                        "bundled imageio-ffmpeg); auto-falls back to JPEG if none.")
     p.add_argument("--rerun-video-long-edge", "--rerun_video_long_edge",
                    type=int, default=720,
                    help="Long-edge target (px) for the H.264 backdrop under "

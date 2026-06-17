@@ -42,8 +42,31 @@ def _set_time_seconds(seconds: float) -> None:
 
 
 def _ffmpeg_bin() -> str:
+    """Path to an ffmpeg binary: system ``ffmpeg`` first, else the one bundled
+    with ``imageio-ffmpeg`` (so the H.264 backdrop works without a system install)."""
     import shutil
-    return shutil.which("ffmpeg") or "ffmpeg"
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def ffmpeg_available() -> bool:
+    """True when an ffmpeg binary is reachable (system or bundled). Used to
+    decide whether the default H.264 backdrop can run, or must fall back to JPEG."""
+    import os
+    import shutil
+    if shutil.which("ffmpeg"):
+        return True
+    try:
+        import imageio_ffmpeg
+        return os.path.exists(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return False
 
 
 def _probe_video_codec(path: str) -> str:

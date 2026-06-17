@@ -211,6 +211,24 @@ near-instant. Default chosen: **720p long-edge** (size cheap; decode safe ×32 �
 4K×32 exceeds the browser 30 fps decode budget + likely the GPU's concurrent-decode
 session cap).
 
+### Default + the ffmpeg dependency (no install change needed)
+
+`--rerun-video` is now **on by default** (`BooleanOptionalAction`, default True);
+`--no-rerun-video` restores the legacy per-frame JPEG backdrop. The default path
+needs an ffmpeg binary, and that's already covered with **no install change**:
+
+- `imageio-ffmpeg` is **already a declared dep** (`requirements.txt`) — also pulled
+  by ImageIO + moviepy. It bundles a static, cross-platform ffmpeg with **libx264**
+  (verified it encodes). `_ffmpeg_bin()` prefers system ffmpeg, else this bundled
+  binary, so the backdrop works after a plain `pip install -r` on any OS.
+- `ffmpeg_available()` gates the default: if no ffmpeg is reachable, `ma_vis`
+  **auto-falls back to the JPEG path** (a warning, never a failure).
+- `ffprobe` is optional (only the "already-H.264 → skip re-encode" shortcut); absent
+  ⇒ we just always re-encode.
+
+So: declare nothing new, change nothing in INSTALL; an optional one-line doc note
+("video backdrop uses the bundled ffmpeg") is the only thing worth adding.
+
 ## Phased plan
 
 - **Phase 0 — Pin alignment (correctness fix, no feature change).** Bump the
