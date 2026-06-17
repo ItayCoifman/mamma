@@ -140,7 +140,7 @@ def _ensure_h264(src_path, width, height, frame_start, frame_end, crf):
         mtime = 0
     # Bump _ENCODE_RECIPE whenever the ffmpeg recipe changes so stale cached
     # re-encodes are regenerated rather than silently reused.
-    _ENCODE_RECIPE = "v2-bt709-main"
+    _ENCODE_RECIPE = "v3-bt709-main-gop30-lvl40"
     key = hashlib.md5(
         f"{os.path.abspath(src_path)}:{mtime}:{width}x{height}:{fs}:{fe}:"
         f"{crf}:{_ENCODE_RECIPE}".encode()
@@ -164,10 +164,17 @@ def _ensure_h264(src_path, width, height, frame_start, frame_end, crf):
     tmp = out + ".tmp.mp4"
     subprocess.run(
         [_ffmpeg_bin(), "-y", "-i", src_path, "-vf", ",".join(vf), "-an",
-         # 'main' profile is the most universally WebCodecs-decodable; bf=0 keeps
-         # access units in display order for 1:1 timeline mapping.
-         "-c:v", "libx264", "-profile:v", "main", "-preset", "medium",
-         "-crf", str(int(crf)), "-bf", "0", "-pix_fmt", "yuv420p",
+         # WebCodecs (the browser decoder) is far stricter than the native one:
+         #  - 'main' profile + an explicit, sufficient level (4.0 covers <=1080p)
+         #    so the stream isn't rejected for an under-reported level;
+         #  - frequent keyframes (1s GOP, no scene-cut jitter) so the viewer can
+         #    always start decoding from a nearby IDR — a long default GOP leaves
+         #    only one keyframe, which can render black on seek/scrub in-browser;
+         #  - bf=0 keeps access units in display order for 1:1 timeline mapping.
+         "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0",
+         "-preset", "medium", "-crf", str(int(crf)),
+         "-bf", "0", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+         "-pix_fmt", "yuv420p",
          "-colorspace", "bt709", "-color_primaries", "bt709",
          "-color_trc", "bt709", "-color_range", "tv",
          "-movflags", "+faststart", tmp],
