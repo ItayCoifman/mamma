@@ -244,8 +244,17 @@ fully-specified **BT.709 limited-range yuv420p** (`out_color_matrix=bt709` +
 profile (most universally WebCodecs-decodable), and `+faststart`. Verified the
 output now tags `bt709/bt709/bt709` with no `unknown` fields (was
 `bt470bg/unknown/unknown`). Cache key carries an `_ENCODE_RECIPE` version so the
-fix regenerates stale re-encodes. Also: **Chrome/Chromium recommended** — Firefox
-has known WebCodecs H.264 bugs.
+fix regenerates stale re-encodes.
+
+**Observed in practice (Linux):** with the clean `avc1.4D4028` (Main/4.0/BT.709)
+stream, backdrops play in **Firefox AND the native viewer**, but are **black in
+Chrome**. That vindicates the encode — the remaining issue is **Chrome's hardware
+video decode (VAAPI on Linux) rendering black**, a known Chrome/GPU-driver problem
+independent of our encoding. Workarounds are Chrome-side: launch with
+`--disable-accelerated-video-decode` (force software decode — rerun's own
+recommended mitigation), toggle `chrome://flags` "Hardware-accelerated video
+decode", or just use Firefox. (Note: this contradicts the generic "prefer Chrome"
+guidance — browser/GPU video-decode support is environment-specific.)
 
 ## Phased plan
 
