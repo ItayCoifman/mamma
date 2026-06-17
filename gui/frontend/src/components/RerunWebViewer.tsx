@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Sparkles, Monitor, Loader2, Maximize2, Minimize2 } from 'lucide-react';
+import { X, Sparkles, Monitor, Loader2, Maximize2, Minimize2, Info } from 'lucide-react';
 import { WebViewer } from '@rerun-io/web-viewer';
+import { isChromiumBased } from './shared/browser';
+
+const CHROME_HINT_KEY = 'mamma.rrdChromeVideoHintDismissed';
 
 interface Props {
   /** Absolute on-disk path of the .rrd to open. Streamed via /api/rrd/file.rrd. */
@@ -38,6 +41,17 @@ export function RerunWebViewer({ rrdPath, fileName, onClose, onOpenNative }: Pro
    *  on the start() call below — and instead just expand our own modal
    *  to fill the window. */
   const [expanded, setExpanded] = useState(false);
+  // One-time, dismissible heads-up shown only to Chromium users: their H.264
+  // camera backdrops can render black on some Linux GPU setups (Firefox + the
+  // native viewer are unaffected). Phrased conditionally so it never alarms.
+  const [chromeHintDismissed, setChromeHintDismissed] = useState(() => {
+    try { return localStorage.getItem(CHROME_HINT_KEY) === '1'; } catch { return false; }
+  });
+  const dismissChromeHint = () => {
+    setChromeHintDismissed(true);
+    try { localStorage.setItem(CHROME_HINT_KEY, '1'); } catch { /* ignore */ }
+  };
+  const showChromeHint = phase === 'ready' && !chromeHintDismissed && isChromiumBased();
 
   useEffect(() => {
     let cancelled = false;
@@ -170,6 +184,27 @@ export function RerunWebViewer({ rrdPath, fileName, onClose, onOpenNative }: Pro
             </button>
           </div>
         </header>
+
+        {showChromeHint && (
+          <div className="flex items-start gap-2.5 px-3 py-2 border-b border-border-subtle bg-primary-muted/40 text-xs" role="status">
+            <Info className="w-3.5 h-3.5 text-primary mt-0.5 flex-shrink-0" />
+            <p className="flex-1 text-foreground-muted leading-relaxed">
+              Camera video backdrops not showing in the scene? Chrome can't decode
+              them on some Linux GPU setups. Try <span className="text-foreground font-medium">Firefox</span>
+              {onOpenNative ? (
+                <>, or <button onClick={onOpenNative} className="text-primary hover:underline font-medium">open the native viewer</button></>
+              ) : null}
+              {' '}— the 3D scene and overlays are unaffected.
+            </p>
+            <button
+              onClick={dismissChromeHint}
+              aria-label="Dismiss"
+              className="text-foreground-subtle hover:text-foreground p-0.5 -m-0.5 rounded hover:bg-surface-3 transition-colors flex-shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         <div className="relative flex-1 bg-background">
           {phase === 'starting' && (
