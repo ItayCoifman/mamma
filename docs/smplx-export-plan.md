@@ -111,13 +111,32 @@ ma_cap separately — workable, but the metadata makes it robust across datasets
 - **FPS / timing:** animation duration = frames / fps.
 - **Multi-person:** N people → N upright, correctly-placed armatures.
 
-## Open decisions (need your input)
+## Locked decisions
 
-- **Up-axis of your captures** — always Z-up (the `--up-axis z` default), or does it
-  vary per dataset/calibration? Drives conversion #2.
-- **Per-person files vs. one combined export** — separate `.npz`/FBX/ABC per person
-  (simplest, matches the add-on's one-body model), or a combined scene too?
-- **Target engine** — Unity, Unreal, or generic? The add-on bakes engine-specific
-  scale/axis into FBX/ABC (e.g. ×100 for Unreal).
-- **Where it lives** — a new pipeline step (`ma_export`) + GUI button, or a standalone
-  CLI script first.
+- **Sequencing:** **NPZ first** (pure-Python exporter + round-trip validation), then
+  FBX/ABC via Blender headless, then pipeline/GUI integration.
+- **Up-axis:** **varies by dataset** → the exporter takes the world up-axis as input
+  (from `ma_vis`'s `--up-axis`, the run config, and/or stamped `ma_3d` metadata) and
+  applies the per-capture up-axis → AMASS Y-up conversion. Default Z-up if unspecified;
+  verify upright in Blender.
+- **Multi-person:** **per-person files** — one `<seq>_body-NN_smplx.{npz,fbx,abc}` per
+  detected person (matches the add-on's one-body model). No combined scene for now.
+- **Target engine:** **Generic / Blender** — the add-on's default axis + scale, no
+  engine-specific (Unity/Unreal) scaling. Engine presets can be added later.
+
+## Build order (per the decisions)
+
+- **Phase 1 — npz exporter** (`optimization/export_blender.py` or
+  `scripts/export_smplx_blender.py`): reads `smplx_params_body_id-*.npz` + ma_cap
+  `global.npz` (fps) + the SMPL-X model (`pose_mean`); takes `--up-axis`; bakes the
+  hand mean; converts the frame; writes per-person `<seq>_body-NN_smplx.npz`. Gate on
+  the round-trip test (exported params → SMPL-X verts ≈ MAMMA `pred_vertices`).
+- **Phase 2 — FBX + ABC**: `scripts/blender_export.py` via `blender --background`,
+  importing the Phase-1 npz with the add-on and calling its FBX/Alembic exporters
+  (generic axis/scale).
+- **Phase 3 — integration**: optional `ma_export` step + a GUI "Export for Blender"
+  action, once 1–2 are validated.
+
+> Recommended small `ma_3d` edit (Phase 0, optional): stamp `flat_hand_mean`, `gender`,
+> `num_betas`, `up_axis`, and `fps` into `smplx_params_*.npz` so the exporter is fully
+> self-describing across datasets (esp. given the varying up-axis).
