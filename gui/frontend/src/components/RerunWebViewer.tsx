@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Sparkles, Monitor, Loader2, Maximize2, Minimize2, Info } from 'lucide-react';
+import { X, Sparkles, Monitor, Loader2, Maximize2, Minimize2, AlertTriangle } from 'lucide-react';
 import { WebViewer } from '@rerun-io/web-viewer';
 import { isChromiumBased } from './shared/browser';
 
@@ -186,11 +186,12 @@ export function RerunWebViewer({ rrdPath, fileName, onClose, onOpenNative }: Pro
         </header>
 
         {showChromeHint && (
-          <div className="flex items-start gap-2.5 px-3 py-2 border-b border-border-subtle bg-primary-muted/40 text-xs" role="status">
-            <Info className="w-3.5 h-3.5 text-primary mt-0.5 flex-shrink-0" />
+          <div className="flex items-start gap-2.5 px-3 py-2 border-b border-status-mixed/30 border-l-2 border-l-status-mixed bg-status-mixed-bg text-xs" role="alert">
+            <AlertTriangle className="w-4 h-4 text-status-mixed mt-px flex-shrink-0" />
             <p className="flex-1 text-foreground-muted leading-relaxed">
-              Camera video backdrops not showing in the scene? Chrome can't decode
-              them on some Linux GPU setups. Try <span className="text-foreground font-medium">Firefox</span>
+              <span className="text-status-mixed font-semibold">Using Chrome?</span>{' '}
+              Camera video backdrops can render black on some Linux GPU setups. Try{' '}
+              <span className="text-foreground font-medium">Firefox</span>
               {onOpenNative ? (
                 <>, or <button onClick={onOpenNative} className="text-primary hover:underline font-medium">open the native viewer</button></>
               ) : null}
