@@ -140,6 +140,54 @@ Recommendation: **A now** (it formalizes the already-working state and fixes the
 fresh-install/viewer mismatch with near-zero risk), then evaluate **C** as the clean
 long-term story, and **B** only if/when sam2/sam3 drop their numpy<2 requirement.
 
+## Phase 1 design — how we adapt PR #48 to MAMMA's batch pipeline
+
+PR #48 uses `rr.VideoStream` with **per-sample** NVENC emission because it's a *live
+streaming* loop. MAMMA is **batch** (re-encode the finished clip once), so the natural
+fit is **`rr.AssetVideo`** — log the whole re-encoded H.264 file once, no per-frame
+access-unit extraction (no PyAV needed). Same ~15× size win, simpler code.
+
+**Conditional re-encode (only when necessary):**
+
+| source | action | re-encode? |
+|---|---|---|
+| already H.264, no trim | `rr.AssetVideo` on the original file | **No** |
+| HEVC/H.265/AV1/etc. (this repo's data) or needs trim/downscale | decode → re-encode H.264 → `AssetVideo` | **Yes**, once |
+
+- Rule of thumb: **re-encode only when the source isn't already H.264** (the one codec
+  the web viewer decodes everywhere).
+- **Cache** the re-encode keyed on `(source path, mtime/size, target resolution, frame
+  range, crf)` — repeat `ma_vis` runs reuse it (same idea as the TensorRT engine cache).
+- Whole feature is **opt-in** behind `--video-stream`; default stays per-frame JPEG.
+
+**Time alignment (simpler than PR #48 — no streaming lag):**
+
+- Encode with **`-bf 0` (no B-frames)** so access units map 1:1 in display order.
+- Log `rr.AssetVideo(path=mp4)` once (`static`), read its per-frame PTS via
+  `read_frame_timestamps_nanos()`, then emit a `rr.VideoFrameReference` for each frame
+  at timeline `time = frame_id/fps` — the **identical mapping overlays already use**
+  (`go_to_frame → _set_time_seconds(frame_id/fps)`). Video frame N and overlay N land
+  on the same timeline instant by construction.
+- PR #48's "fixed-lag" re-stamping is **not needed**: that corrected a sliding-window
+  fitter emitting poses `emit_lag` ticks late; MAMMA's `ma_3d` is a batch optimizer and
+  `ma_vis` reads finished fits, so there is no emit-lag.
+
+### Phase 1 prototype — measured on real `.rrd` (200 f, 1080p, 1 cam)
+
+A standalone prototype (re-encode → `AssetVideo` + `VideoFrameReference` on the
+`"time"` timeline, vs per-frame JPEG) on a real HEVC camera clip:
+
+| | result |
+|---|---|
+| conditional re-encode + cache | HEVC→H.264 200 f = 4.7 MB in 1.7 s; **2nd run = cache hit (skipped)** |
+| **real `.rrd` size** | AssetVideo **4.74 MB** vs JPEG **65.34 MB** → **13.8× smaller** |
+| **alignment (structural)** | 200 video PTS == 200 overlay frames; video PTS == overlay `fid/fps` exactly (`f1 = 0.0333 s = 1/30`) |
+
+So the size win holds on the actual `.rrd` (13.8×, close to the 14.9× payload
+estimate; the gap is fixed `.rrd` overhead). Alignment is correct **by
+construction** — same frame count (no drops, `bf=0`) and identical frame→time
+mapping. Final *visual* confirmation (probe dot glides in lock-step) is a GUI check.
+
 ## Phased plan
 
 - **Phase 0 — Pin alignment (correctness fix, no feature change).** Bump the
