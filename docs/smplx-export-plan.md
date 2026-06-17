@@ -111,6 +111,24 @@ ma_cap separately — workable, but the metadata makes it robust across datasets
 - **FPS / timing:** animation duration = frames / fps.
 - **Multi-person:** N people → N upright, correctly-placed armatures.
 
+## Implementation status — Phase 0 + Phase 1 DONE (validated)
+
+- **Phase 0 (`run_ma_3d.py`)**: stamps additive, namespaced `smplx_export_*` metadata
+  (`model_type`, `gender`, `num_betas`, `flat_hand_mean`) into `smplx_params_*.npz`.
+  Defensive (never breaks a run) and backward-compatible (old readers ignore it).
+- **Phase 1 (`optimization/export_blender.py`)**: per-person exporter → add-on npz.
+  Validated on the example: **round-trip 0.000 mm**, correct add-on keys/shapes, fps
+  read from ma_cap, Z-up→Y-up applied. Runs on old (pre-metadata) files via fallback.
+
+**Corrected flat_hand_mean finding (the trap):** the prediction (neutral) model is
+built by `get_smplx_models()` which **defaults `flat_hand=False`** and is called
+without override in normal inference — so **inference fits use `flat_hand_mean=False`**.
+The `rich`/`chi3d` → `flat_hand=True` branch in `run_ma_3d.py` is **eval-only** and
+only affects the *GT* model, not the prediction. So `ma_3d` now stamps the **real**
+pred-model value (`smplx_model[body_id]["neutral"].flat_hand_mean`), and the exporter
+**auto-detects** flat_hand_mean by reconstructing the saved `pred_vertices` (the stamp
+is only a first-try hint) — bulletproof across datasets and older files.
+
 ## Locked decisions
 
 - **Sequencing:** **NPZ first** (pure-Python exporter + round-trip validation), then
