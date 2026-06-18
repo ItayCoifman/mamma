@@ -28,10 +28,9 @@ export function Exporter() {
   const [seqs, setSeqs] = useState<Seq[]>([]);
   const [sel, setSel] = useState<string>('');
   const [formats, setFormats] = useState<Record<string, boolean>>({ npz: true, fbx: false, abc: false, bvh: false, usd: false });
-  const [coordSystem, setCoordSystem] = useState('keep');
-  const [upAxis, setUpAxis] = useState('auto');
+  const [ground, setGround] = useState(true);
+  const [unit, setUnit] = useState('m');
   const [fps, setFps] = useState('');
-  const [fbxTarget, setFbxTarget] = useState('UNITY');
   const [job, setJob] = useState<Job | null>(null);
   const [dlJob, setDlJob] = useState<Job | null>(null);
   const [showAddonForm, setShowAddonForm] = useState(false);
@@ -82,7 +81,7 @@ export function Exporter() {
     const r = await jpost<{ job_id: string }>('/api/exporter/export', {
       tag: selSeq.tag, capture: selSeq.capture, seq: selSeq.seq,
       ma_3d_dir: selSeq.ma_3d_dir, ma_cap_dir: selSeq.ma_cap_dir,
-      formats: chosen, coord_system: coordSystem, up_axis: upAxis, fps: fps ? Number(fps) : undefined, fbx_target: fbxTarget,
+      formats: chosen, ground, unit, fps: fps ? Number(fps) : undefined,
     });
     setJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'export' });
   };
@@ -180,30 +179,22 @@ export function Exporter() {
           })}
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-foreground-muted">
-          <label className="flex items-center gap-1.5">Coordinate system
-            <select value={coordSystem} onChange={e => setCoordSystem(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-              <option value="keep">Keep original (as captured)</option>
-              <option value="blender">Blender-compatible (Z-up, grounded)</option>
+          <label className="flex items-center gap-1.5 cursor-pointer" title="Drop the feet to the floor (0 along the detected up-axis). The fit's axes are never changed.">
+            <input type="checkbox" checked={ground} onChange={e => setGround(e.target.checked)} className="accent-primary" />
+            Place on floor
+          </label>
+          <label className="flex items-center gap-1.5" title="Units for FBX/ABC/USD/BVH. Meters for Blender/Unity/Maya; centimeters for Unreal. The npz stays in meters.">Unit
+            <select value={unit} onChange={e => setUnit(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
+              <option value="m">meters</option><option value="cm">centimeters</option>
             </select>
           </label>
-          {coordSystem === 'blender' && (
-            <label className="flex items-center gap-1.5">Source up
-              <select value={upAxis} onChange={e => setUpAxis(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-                <option value="auto">auto</option><option value="z">z</option><option value="y">y</option><option value="x">x</option>
-              </select>
-            </label>
-          )}
           <label className="flex items-center gap-1.5">FPS
             <input value={fps} onChange={e => setFps(e.target.value)} placeholder="auto" className="w-16 bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground" />
           </label>
-          {formats.fbx && (
-            <label className="flex items-center gap-1.5">FBX target
-              <select value={fbxTarget} onChange={e => setFbxTarget(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-                <option value="UNITY">Unity</option><option value="UNREAL">Unreal</option>
-              </select>
-            </label>
-          )}
         </div>
+        <p className="mt-2 text-[11px] text-foreground-faint">
+          The npz keeps your data's own coordinate system; up-axis is auto-detected. FBX/ABC/USD/BVH are built from it via Blender.
+        </p>
       </div>
 
       {/* ④ Export */}

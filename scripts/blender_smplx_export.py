@@ -3,15 +3,16 @@
 Run via the portable Blender:
   blender --background --python scripts/blender_smplx_export.py -- \
       --addon-dir data/blender_addon --npz body.npz --out-prefix out/body \
-      --formats fbx,abc,bvh,usd --fps 30 --fbx-target UNITY
+      --formats fbx,abc,bvh,usd --fps 30 --target blender
 
 We do NOT install or duplicate the add-on: we import it as a library, call
 register(), and drive its operators (scene.smplx_add_gender,
 object.smplx_add_animation, object.smplx_export_fbx/_alembic). BVH/USD aren't
 add-on features, so those use Blender's native exporters on the add-on-built rig.
 
-Our npz is already AMASS Y-up with the relaxed-hand mean baked in, so we import
-it as anim_format=AMASS + hand_reference=FLAT.
+The incoming npz is Z-up-normalized upstream with the relaxed-hand mean baked in,
+so we import it as anim_format=AMASS + hand_reference=FLAT (which reproduces the
+Z-up body faithfully). --target sets each format's destination up-axis + units.
 """
 import sys
 import os
@@ -29,7 +30,8 @@ def _args():
     p.add_argument("--out-prefix", required=True, help="Output path prefix (no extension).")
     p.add_argument("--formats", default="fbx,abc", help="Comma list: fbx,abc,bvh,usd.")
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--fbx-target", default="UNITY", choices=["UNITY", "UNREAL"])
+    p.add_argument("--unit", default="m", choices=["m", "cm"],
+                   help="Units for the geometry: m (meters) or cm (centimeters).")
     return p.parse_args(argv)
 
 
@@ -88,27 +90,38 @@ def main():
     os.makedirs(os.path.dirname(out), exist_ok=True)
     written = []
 
+    # All formats derive from the single npz source — no per-format reorientation.
+    # `unit` is the only knob: m (scale 1) or cm (scale 100). The add-on FBX UNREAL
+    # preset bakes the x100, so cm -> UNREAL preset, m -> UNITY preset.
+    cm = (a.unit == "cm")
+    scale = 100.0 if cm else 1.0
+    fbx_preset = "UNREAL" if cm else "UNITY"
+    print(f"[blender_export] unit={a.unit} (scale {scale:g}) -> fbx preset={fbx_preset}")
+
     if "fbx" in formats:
         _select([mesh, arm], mesh)
-        bpy.ops.object.smplx_export_fbx(filepath=out + ".fbx", target_format=a.fbx_target)
+        bpy.ops.object.smplx_export_fbx(filepath=out + ".fbx", target_format=fbx_preset)
         written.append(out + ".fbx")
 
-    if "abc" in formats:
+    if "abc" in formats:  # native (the add-on's ABC op is this call without a scale arg)
         _select([mesh, arm], mesh)
-        bpy.ops.object.smplx_export_alembic(filepath=out + ".abc")
+        bpy.ops.wm.alembic_export(filepath=out + ".abc", selected=True, packuv=False,
+                                  face_sets=True, global_scale=scale)
         written.append(out + ".abc")
 
-    if "bvh" in formats:
-        # Native exporter on the armature (the add-on has no BVH op).
+    if "bvh" in formats:  # native exporter (no add-on BVH op)
         _select([arm], arm)
         bpy.ops.export_anim.bvh(filepath=out + ".bvh", frame_start=bpy.context.scene.frame_start,
-                                frame_end=bpy.context.scene.frame_end, root_transform_only=False)
+                                frame_end=bpy.context.scene.frame_end, root_transform_only=False,
+                                global_scale=scale)
         written.append(out + ".bvh")
 
     if "usd" in formats:
         _select([mesh, arm], mesh)
-        bpy.ops.wm.usd_export(filepath=out + ".usd", selected_objects_only=True,
-                              export_animation=True)
+        usd_kw = dict(filepath=out + ".usd", selected_objects_only=True, export_animation=True)
+        if cm:
+            usd_kw.update(meters_per_unit=0.01)  # centimeters
+        bpy.ops.wm.usd_export(**usd_kw)
         written.append(out + ".usd")
 
     for w in written:

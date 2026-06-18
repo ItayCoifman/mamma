@@ -57,7 +57,7 @@ python optimization/export_blender.py \
   --ma-cap-dir output/ma_cap/<tag>/<capture> \
   --out-dir   output/export/<sequence> \
   --formats   npz,fbx,abc,bvh,usd \
-  --fbx-target UNITY        # or UNREAL (the add-on's only FBX presets)
+  --unit      m             # or cm (Unreal); --no-ground to keep the exact fit translation
 ```
 
 If Blender or the add-on isn't present, the exporter **falls back to npz-only**
@@ -68,10 +68,10 @@ with a warning — it never fails the run for a missing optional dependency.
 | flag | meaning |
 |---|---|
 | `--formats` | comma list of `npz,fbx,abc,bvh,usd` (default `npz`) |
-| `--coord-system` | `keep` (default) exports the fit **untouched** — original up-axis AND floor (respects each capture's own system). `blender` is an optional extra-fix: rotate the detected up onto Blender's **+Z** and drop the feet to the floor (Z=0) |
-| `--up-axis` | only for `--coord-system blender`: the source up to rotate to +Z (`auto` default detects it via foot-plane + body-vertical; or force `x`/`y`/`z`) |
+| `--unit` | units for FBX/ABC/USD/BVH: `m` (meters, default — Blender/Unity/Maya) or `cm` (centimeters — Unreal). The npz is always meters (SMPL-X convention) |
+| `--ground` / `--no-ground` | drop the feet to the floor (0 along the auto-detected up-axis). On by default; `--no-ground` keeps the fit's exact translation. **Never changes the axes** |
+| `--up-axis` | source up-axis for grounding + geometry normalization. `auto` (default) detects it (foot-plane + body-vertical); `x`/`y`/`z` force it |
 | `--fps` | override `mocap_frame_rate` (else read from ma_cap's `global.npz`, else 30) |
-| `--fbx-target` | `UNITY` (≈ generic, default) or `UNREAL` (×100 scale) |
 | `--smplx-models` | SMPL-X model folder (default `data/body_models/smplx_locked_head`) |
 | `--blender-bin` | explicit Blender binary (else `MAMMA_BLENDER_BIN` / `data/blender/` / `PATH`) |
 | `--addon-dir` | add-on folder (default `data/blender_addon`) |
@@ -82,18 +82,19 @@ with a warning — it never fails the run for a missing optional dependency.
 - **Hand pose / `flat_hand_mean`** — the fit's hand convention is **auto-detected**
   from the saved vertices (normal inference is `flat_hand_mean=False`); the relaxed
   mean is baked into absolute hand angles so the add-on imports them as **FLAT**.
-- **Coordinate system** — by default the fit is exported **untouched**: your
-  capture's own up-axis and floor are respected (MAMMA's data is Z-up, which the
-  add-on's AMASS import reproduces faithfully). `--coord-system blender` is an
-  optional fix that rotates the auto-detected up onto Blender's **+Z** and grounds
-  the feet (with the root-pivot correction `(R−I)·J0` so the body sits correctly).
+- **Coordinate system** — the npz keeps the fit's **own axes**, untouched
+  (auto-detected up-axis; works for any capture, not just Z-up). The only optional
+  change is **floor grounding** (a pure translation along the up-axis, `--ground`,
+  on by default). FBX/ABC/BVH/USD are all built from that single npz via the add-on,
+  so they inherit its orientation (FBX additionally gets the add-on's engine adapter).
+- **Units** — `--unit m`/`cm` scales the rigged formats only; the npz stays meters.
 - **FPS** — taken from ma_cap so animation timing is right.
 
 ## Viewing in Blender
 
 Open Blender (the add-on installed normally), use **Add Animation** on the `.npz`,
-or import the `.fbx`/`.abc`/`.usd` directly. FBX with `--fbx-target UNREAL` is
-pre-scaled (×100) for Unreal; `UNITY` keeps Blender units.
+or import the `.fbx`/`.abc`/`.usd` directly. `--unit cm` pre-scales the rigged
+formats (×100) for Unreal; `--unit m` keeps meters (Blender/Unity/Maya).
 
 > **Tip:** the `.npz` is the most faithful (it's the add-on's own format and is
 > round-trip-validated). FBX/ABC/etc. are derived from it through Blender.
