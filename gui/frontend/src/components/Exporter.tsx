@@ -1,38 +1,27 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Download, Check, Loader2, AlertTriangle, Box, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
+import { Download, Check, Loader2, AlertTriangle, ChevronDown, ChevronRight, Search } from 'lucide-react';
+import { ExportPanel, jget, jpost, type Readiness, type Job } from './ExportPanel';
 
-/** SMPL-X Exporter tab: in-tab setup (Blender + add-on downloads), a readiness
- *  check, a completed-sequence picker, format + param selection, and the export
- *  run. Downloads live here (not the Home page) to keep the start uncluttered. */
+/** SMPL-X Exporter tab: in-tab setup (Blender + add-on downloads) and readiness,
+ *  a sequence source (detected results OR a custom path), and the shared export
+ *  panel. The export core itself lives in ExportPanel so it's reused on results. */
 
-interface Readiness { blender: { present: boolean; path: string }; addon: { present: boolean; path: string }; }
 interface Seq { tag: string; capture: string; seq: string; people: number; ma_3d_dir: string; ma_cap_dir: string; already_exported: boolean; }
-interface Job { id: string; kind: string; state: 'running' | 'ready' | 'error'; log_tail: string[]; outputs: string[]; error: string | null; }
 
-const ALL_FORMATS = [
-  { id: 'npz', label: 'npz', hint: 'SMPL-X Blender Add-on', blender: false },
-  { id: 'fbx', label: 'FBX', hint: 'Rigged mesh + skeleton', blender: true },
-  { id: 'abc', label: 'Alembic', hint: 'Vertex/geometry cache', blender: true },
-  { id: 'bvh', label: 'BVH', hint: 'Skeleton motion only', blender: true },
-  { id: 'usd', label: 'USD', hint: 'USD scene', blender: true },
-];
-
-async function jget<T>(url: string): Promise<T> { const r = await fetch(url); return r.json(); }
-async function jpost<T>(url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
-  return r.json();
-}
+const seqKey = (s: Seq) => `${s.tag}/${s.capture}/${s.seq}::${s.ma_3d_dir}`;
+const seqLabel = (s: Seq) => `${s.capture} / ${s.seq} — ${s.people} ${s.people === 1 ? 'person' : 'people'} (run ${s.tag})${s.already_exported ? ' · exported' : ''}`;
 
 export function Exporter() {
   const [ready, setReady] = useState<Readiness | null>(null);
   const [seqs, setSeqs] = useState<Seq[]>([]);
+  const [source, setSource] = useState<'detected' | 'custom'>('detected');
   const [sel, setSel] = useState<string>('');
-  const [formats, setFormats] = useState<Record<string, boolean>>({ npz: true, fbx: false, abc: false, bvh: false, usd: false });
-  const [ground, setGround] = useState(true);
-  const [unit, setUnit] = useState('m');
-  const [blenderFormat, setBlenderFormat] = useState('auto');
-  const [fps, setFps] = useState('');
-  const [job, setJob] = useState<Job | null>(null);
+  // custom path
+  const [customPath, setCustomPath] = useState('');
+  const [customSeqs, setCustomSeqs] = useState<Seq[]>([]);
+  const [customSel, setCustomSel] = useState('');
+  const [scan, setScan] = useState<{ state: 'idle' | 'scanning' | 'done' | 'error'; msg?: string }>({ state: 'idle' });
+  // tools
   const [dlJob, setDlJob] = useState<Job | null>(null);
   const [showAddonForm, setShowAddonForm] = useState(false);
   const [creds, setCreds] = useState({ username: '', password: '' });
@@ -40,11 +29,9 @@ export function Exporter() {
 
   const refreshReady = useCallback(async () => setReady(await jget<Readiness>('/api/exporter/readiness')), []);
   const refreshSeqs = useCallback(async () => setSeqs((await jget<{ sequences: Seq[] }>('/api/exporter/sequences')).sequences), []);
-
   useEffect(() => { refreshReady(); refreshSeqs(); }, [refreshReady, refreshSeqs]);
 
   const toolsReady = !!ready?.blender.present && !!ready?.addon.present;
-  // Collapse setup once everything is ready (but let the user reopen it).
   useEffect(() => { if (toolsReady) setSetupOpen(false); }, [toolsReady]);
 
   // Poll a download job until done, then refresh readiness.
@@ -53,39 +40,36 @@ export function Exporter() {
     const t = setInterval(async () => {
       const j = await jget<Job>(`/api/exporter/job/${dlJob.id}`);
       setDlJob(j);
-      if (j.state !== 'running') { refreshReady(); }
+      if (j.state !== 'running') refreshReady();
     }, 1500);
     return () => clearInterval(t);
   }, [dlJob, refreshReady]);
 
-  // Poll the export job.
-  useEffect(() => {
-    if (!job || job.state !== 'running') return;
-    const t = setInterval(async () => setJob(await jget<Job>(`/api/exporter/job/${job.id}`)), 1500);
-    return () => clearInterval(t);
-  }, [job]);
-
-  const startBlender = async () => setDlJob(await jpost<Job>('/api/exporter/download-blender').then(r => ({ ...(r as { job_id: string }), id: (r as { job_id: string }).job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'blender' } as Job)));
+  const startBlender = async () => {
+    const r = await jpost<{ job_id: string }>('/api/exporter/download-blender');
+    setDlJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'blender' });
+  };
   const startAddon = async () => {
     const r = await jpost<{ job_id: string }>('/api/exporter/download-addon', creds);
     setShowAddonForm(false); setCreds({ username: '', password: '' });
     setDlJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'addon' });
   };
 
-  const selSeq = seqs.find(s => `${s.tag}/${s.capture}/${s.seq}` === sel);
-  const chosen = ALL_FORMATS.filter(f => formats[f.id]).map(f => f.id);
-  const needsBlender = chosen.some(f => ALL_FORMATS.find(x => x.id === f)?.blender);
-  const canExport = !!selSeq && chosen.length > 0 && (!needsBlender || toolsReady) && job?.state !== 'running';
-
-  const runExport = async () => {
-    if (!selSeq) return;
-    const r = await jpost<{ job_id: string }>('/api/exporter/export', {
-      tag: selSeq.tag, capture: selSeq.capture, seq: selSeq.seq,
-      ma_3d_dir: selSeq.ma_3d_dir, ma_cap_dir: selSeq.ma_cap_dir,
-      formats: chosen, ground, unit, blender_format: blenderFormat, fps: fps ? Number(fps) : undefined,
-    });
-    setJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'export' });
+  const runScan = async () => {
+    if (!customPath.trim()) return;
+    setScan({ state: 'scanning' }); setCustomSeqs([]); setCustomSel('');
+    try {
+      const r = await jget<{ sequences: Seq[]; error?: string }>(`/api/exporter/scan?path=${encodeURIComponent(customPath.trim())}`);
+      if (r.error) { setScan({ state: 'error', msg: r.error }); return; }
+      setCustomSeqs(r.sequences);
+      if (r.sequences.length === 1) setCustomSel(seqKey(r.sequences[0]));
+      setScan({ state: 'done', msg: `${r.sequences.length} sequence(s) found` });
+    } catch (e) { setScan({ state: 'error', msg: String(e) }); }
   };
+
+  const list = source === 'detected' ? seqs : customSeqs;
+  const selKey = source === 'detected' ? sel : customSel;
+  const target = list.find(s => seqKey(s) === selKey) ?? null;
 
   const card = 'bg-surface-1 border border-border-subtle rounded-xl p-5 shadow-sm shadow-black/30';
   const ToolRow = ({ name, present, onDl }: { name: string; present: boolean; onDl: () => void }) => (
@@ -99,6 +83,12 @@ export function Exporter() {
         </button>
       )}
     </div>
+  );
+  const tab = (id: 'detected' | 'custom', label: string) => (
+    <button onClick={() => setSource(id)}
+      className={`px-3 py-1 rounded-md text-xs transition-colors ${source === id ? 'bg-surface-2 text-foreground ring-1 ring-inset ring-border' : 'text-foreground-muted hover:text-foreground'}`}>
+      {label}
+    </button>
   );
 
   return (
@@ -148,86 +138,47 @@ export function Exporter() {
 
       {/* ② What to export */}
       <div className={card}>
-        <div className="text-sm font-medium text-foreground mb-2">What to export</div>
-        {seqs.length === 0 ? (
-          <p className="text-foreground-muted text-sm">No completed <code className="font-mono">ma_3d</code> results found. Run the pipeline first.</p>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-foreground">What to export</span>
+          <div className="flex gap-1">{tab('detected', 'Detected results')}{tab('custom', 'Custom path')}</div>
+        </div>
+
+        {source === 'detected' ? (
+          seqs.length === 0 ? (
+            <p className="text-foreground-muted text-sm">No completed <code className="font-mono">ma_3d</code> results found. Run the pipeline, or use <button onClick={() => setSource('custom')} className="text-primary hover:underline">Custom path</button>.</p>
+          ) : (
+            <select value={sel} onChange={e => setSel(e.target.value)} className="w-full bg-surface-2 border border-border rounded-md px-2 py-2 text-sm text-foreground">
+              <option value="">Select a sequence…</option>
+              {seqs.map(s => <option key={seqKey(s)} value={seqKey(s)}>{seqLabel(s)}</option>)}
+            </select>
+          )
         ) : (
-          <select value={sel} onChange={e => setSel(e.target.value)} className="w-full bg-surface-2 border border-border rounded-md px-2 py-2 text-sm text-foreground">
-            <option value="">Select a sequence…</option>
-            {seqs.map(s => {
-              const k = `${s.tag}/${s.capture}/${s.seq}`;
-              return <option key={k} value={k}>{s.capture} / {s.seq} — {s.people} {s.people === 1 ? 'person' : 'people'} (run {s.tag}){s.already_exported ? ' · exported' : ''}</option>;
-            })}
-          </select>
-        )}
-      </div>
-
-      {/* ③ Formats & options */}
-      <div className={card}>
-        <div className="text-sm font-medium text-foreground mb-2">Formats & options</div>
-        <div className="flex flex-wrap gap-2">
-          {ALL_FORMATS.map(f => {
-            const disabled = f.blender && !toolsReady;
-            const on = formats[f.id];
-            return (
-              <button key={f.id} disabled={disabled} title={disabled ? 'Needs Blender — set up Export tools above' : f.hint}
-                onClick={() => setFormats(p => ({ ...p, [f.id]: !p[f.id] }))}
-                className={`inline-flex flex-col items-start px-3 py-1.5 rounded-md border text-xs transition-colors ${on ? 'bg-primary-muted border-primary/40 text-foreground' : 'bg-surface-2 border-border text-foreground-muted'} ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:border-primary/40'}`}>
-                <span className="font-medium">{on ? '✓ ' : ''}{f.label}</span>
-                <span className="text-[10px] text-foreground-faint">{disabled ? 'needs Blender' : f.hint}</span>
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <input value={customPath} onChange={e => setCustomPath(e.target.value)} onKeyDown={e => e.key === 'Enter' && runScan()}
+                placeholder="/path/to/ma_3d (or a sequence folder with smplx_params_*.npz)"
+                className="flex-1 bg-surface-2 border border-border rounded-md px-2 py-2 text-sm text-foreground font-mono" />
+              <button onClick={runScan} disabled={!customPath.trim() || scan.state === 'scanning'}
+                className="inline-flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border rounded-md text-sm text-foreground disabled:opacity-40">
+                {scan.state === 'scanning' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} Find
               </button>
-            );
-          })}
-        </div>
-        <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-foreground-muted">
-          <label className="flex items-center gap-1.5 cursor-pointer" title="Drop the feet to the floor (0 along the detected up-axis). The fit's axes are never changed.">
-            <input type="checkbox" checked={ground} onChange={e => setGround(e.target.checked)} className="accent-primary" />
-            Place on floor
-          </label>
-          <label className="flex items-center gap-1.5" title="Units for FBX/ABC/USD/BVH. Meters for Blender/Unity/Maya; centimeters for Unreal. The npz stays in meters.">Unit
-            <select value={unit} onChange={e => setUnit(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-              <option value="m">meters</option><option value="cm">centimeters</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-1.5" title="Prepares the npz so the add-on's Add Animation imports it upright with this Format. Auto keeps your data's axes and tells you which Format to pick.">Blender import
-            <select value={blenderFormat} onChange={e => setBlenderFormat(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-              <option value="auto">Auto (keep data axes)</option>
-              <option value="amass">AMASS (Z-up)</option>
-              <option value="smplx">SMPL-X (Y-up)</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-1.5">FPS
-            <input value={fps} onChange={e => setFps(e.target.value)} placeholder="auto" className="w-16 bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground" />
-          </label>
-        </div>
-      </div>
-
-      {/* ④ Export */}
-      <div className={card}>
-        <button onClick={runExport} disabled={!canExport}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">
-          <Box className="w-4 h-4" /> Export
-        </button>
-        {!canExport && needsBlender && !toolsReady && <span className="ml-3 text-status-pending text-xs">set up Export tools for the Blender formats</span>}
-        {job && (
-          <div className="mt-3 text-sm">
-            {job.state === 'running' && <span className="inline-flex items-center gap-2 text-status-running"><Loader2 className="w-4 h-4 animate-spin" /> exporting…</span>}
-            {job.state === 'error' && <span className="inline-flex items-center gap-2 text-status-failed"><AlertTriangle className="w-4 h-4" /> {job.error}</span>}
-            {job.state === 'ready' && (
-              <div>
-                <span className="inline-flex items-center gap-2 text-status-completed"><Check className="w-4 h-4" /> wrote {job.outputs.length} file(s)</span>
-                <ul className="mt-2 space-y-0.5">
-                  {job.outputs.map(o => (
-                    <li key={o} className="flex items-center gap-1.5 text-foreground-faint text-xs font-mono"><FolderOpen className="w-3 h-3 flex-shrink-0" /> {o}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {job.state === 'running' && job.log_tail.length > 0 && (
-              <pre className="mt-2 text-[11px] text-foreground-faint font-mono max-h-32 overflow-auto whitespace-pre-wrap">{job.log_tail.slice(-8).join('\n')}</pre>
+            </div>
+            {scan.state === 'error' && <p className="text-status-failed text-xs"><AlertTriangle className="w-3.5 h-3.5 inline mr-1" />{scan.msg}</p>}
+            {scan.state === 'done' && customSeqs.length === 0 && <p className="text-foreground-muted text-xs">No <code className="font-mono">smplx_params_*.npz</code> found under that path.</p>}
+            {customSeqs.length > 0 && (
+              <select value={customSel} onChange={e => setCustomSel(e.target.value)} className="w-full bg-surface-2 border border-border rounded-md px-2 py-2 text-sm text-foreground">
+                <option value="">Select a sequence… ({customSeqs.length} found)</option>
+                {customSeqs.map(s => <option key={seqKey(s)} value={seqKey(s)}>{seqLabel(s)}</option>)}
+              </select>
             )}
           </div>
         )}
+      </div>
+
+      {/* ③ Formats & options + run (shared) */}
+      <div className={card}>
+        <div className="text-sm font-medium text-foreground mb-3">Formats & options</div>
+        <ExportPanel target={target} readiness={ready} onNeedTools={() => setSetupOpen(true)} />
       </div>
     </div>
   );

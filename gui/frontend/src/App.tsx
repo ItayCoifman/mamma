@@ -143,6 +143,7 @@ export default function App() {
             captureName={selectedCapture.name}
             onBack={() => goToTab(detailOrigin)}
             initial={outputsInitial ?? undefined}
+            onGoToExporter={() => goToTab('Exporter')}
           />
         )}
       </main>

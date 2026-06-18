@@ -154,6 +154,39 @@ def _exportable_sequences() -> list[dict]:
     return seqs
 
 
+def _scan_sequences(root: str):
+    """Scan an arbitrary path for exportable sequences (results not under output/).
+    Looks for smplx_params_body_id-*.npz at the path itself and up to 3 levels deep.
+    Returns (sequences, error). ma_cap is inferred when the path mirrors output/."""
+    p = Path(root).expanduser()
+    if not p.exists():
+        return [], f"path not found: {root}"
+    if not p.is_dir():
+        return [], f"not a directory: {root}"
+    hits = []
+    for depth in range(4):  # the path itself, or up to 3 levels deep (tag/capture/seq)
+        hits += glob.glob(os.path.join(str(p), *(["*"] * depth), "smplx_params_body_id-*.npz"))
+    seqs = []
+    for params in sorted(set(hits)):
+        seq_dir = Path(params).parent
+        ma_3d_dir = str(seq_dir.parent)
+        key = (ma_3d_dir, seq_dir.name)
+        existing = next((s for s in seqs if s["_key"] == key), None)
+        if existing:
+            existing["people"] += 1
+            continue
+        ma_cap = ma_3d_dir.replace(f"{os.sep}ma_3d{os.sep}", f"{os.sep}ma_cap{os.sep}")
+        seqs.append({
+            "_key": key, "tag": seq_dir.parent.parent.name, "capture": seq_dir.parent.name,
+            "seq": seq_dir.name, "people": 1, "ma_3d_dir": ma_3d_dir,
+            "ma_cap_dir": ma_cap if (ma_cap != ma_3d_dir and Path(ma_cap).is_dir()) else "",
+            "already_exported": False,
+        })
+    for s in seqs:
+        s.pop("_key", None)
+    return seqs, None
+
+
 # ---- routes -------------------------------------------------------------
 
 def register_routes(app) -> None:
@@ -181,6 +214,14 @@ def register_routes(app) -> None:
     @app.get("/api/exporter/sequences")
     def _exporter_sequences():
         return jsonify({"sequences": _exportable_sequences()})
+
+    @app.get("/api/exporter/scan")
+    def _exporter_scan():
+        path = request.args.get("path", "").strip()
+        if not path:
+            return jsonify({"sequences": [], "error": "no path given"})
+        seqs, err = _scan_sequences(path)
+        return jsonify({"sequences": seqs, "error": err})
 
     @app.post("/api/exporter/export")
     def _exporter_export():

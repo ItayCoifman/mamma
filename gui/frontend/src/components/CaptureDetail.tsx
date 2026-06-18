@@ -9,6 +9,7 @@ import { RerunWebViewer } from './RerunWebViewer';
 import { HtmlViewer } from './HtmlViewer';
 import { NpzViewer } from './NpzViewer';
 import { StepOutputs } from './StepOutputs';
+import { ResultExport } from './ResultExport';
 import { formatTaskId } from './shared/formatTaskId';
 import { formatRelativeTime } from './shared/relativeTime';
 
@@ -67,6 +68,8 @@ interface Task {
 interface CaptureDetailProps {
   captureName: string;
   onBack: () => void;
+  /** Jump to the Exporter tab (for tool setup / custom-path export). */
+  onGoToExporter?: () => void;
   /** Optional deep-link state (set when arriving from a Tasks-tab cell click).
    *  Pre-selects the Outputs explorer's task/sequence/process so the user
    *  lands directly on the cell's output directory. */
@@ -194,7 +197,7 @@ function VideoPlayer({ relPath }: { relPath: string }) {
   );
 }
 
-export function CaptureDetail({ captureName, onBack, initial }: CaptureDetailProps) {
+export function CaptureDetail({ captureName, onBack, initial, onGoToExporter }: CaptureDetailProps) {
   // Initial values come from the deep-link prop (Tasks → Results jump). The
   // existing auto-default effects only fire when these are empty, so a
   // pre-set value isn't clobbered.
@@ -546,6 +549,8 @@ export function CaptureDetail({ captureName, onBack, initial }: CaptureDetailPro
             </div>
           </section>
         )}
+
+        <ResultExport captureName={captureName} initialSeq={selectedSequence} onGoToExporter={onGoToExporter} />
 
         <div className="grid grid-cols-1 gap-6">
           <div className="lg:col-span-1">
