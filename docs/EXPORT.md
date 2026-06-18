@@ -68,7 +68,8 @@ with a warning — it never fails the run for a missing optional dependency.
 | flag | meaning |
 |---|---|
 | `--formats` | comma list of `npz,fbx,abc,bvh,usd` (default `npz`) |
-| `--up-axis` | `auto` (default) detects up + floor from the motion and drops feet to Y=0; or force `x`/`y`/`z`. Converted to the add-on's AMASS Y-up |
+| `--coord-system` | `keep` (default) exports the fit **untouched** — original up-axis AND floor (respects each capture's own system). `blender` is an optional extra-fix: rotate the detected up onto Blender's **+Z** and drop the feet to the floor (Z=0) |
+| `--up-axis` | only for `--coord-system blender`: the source up to rotate to +Z (`auto` default detects it via foot-plane + body-vertical; or force `x`/`y`/`z`) |
 | `--fps` | override `mocap_frame_rate` (else read from ma_cap's `global.npz`, else 30) |
 | `--fbx-target` | `UNITY` (≈ generic, default) or `UNREAL` (×100 scale) |
 | `--smplx-models` | SMPL-X model folder (default `data/body_models/smplx_locked_head`) |
@@ -81,8 +82,11 @@ with a warning — it never fails the run for a missing optional dependency.
 - **Hand pose / `flat_hand_mean`** — the fit's hand convention is **auto-detected**
   from the saved vertices (normal inference is `flat_hand_mean=False`); the relaxed
   mean is baked into absolute hand angles so the add-on imports them as **FLAT**.
-- **Global orientation** — `global_orient` + `trans` are rotated from `--up-axis`
-  to AMASS Y-up, including the root-pivot correction so the body sits correctly.
+- **Coordinate system** — by default the fit is exported **untouched**: your
+  capture's own up-axis and floor are respected (MAMMA's data is Z-up, which the
+  add-on's AMASS import reproduces faithfully). `--coord-system blender` is an
+  optional fix that rotates the auto-detected up onto Blender's **+Z** and grounds
+  the feet (with the root-pivot correction `(R−I)·J0` so the body sits correctly).
 - **FPS** — taken from ma_cap so animation timing is right.
 
 ## Viewing in Blender

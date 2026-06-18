@@ -28,6 +28,7 @@ export function Exporter() {
   const [seqs, setSeqs] = useState<Seq[]>([]);
   const [sel, setSel] = useState<string>('');
   const [formats, setFormats] = useState<Record<string, boolean>>({ npz: true, fbx: false, abc: false, bvh: false, usd: false });
+  const [coordSystem, setCoordSystem] = useState('keep');
   const [upAxis, setUpAxis] = useState('auto');
   const [fps, setFps] = useState('');
   const [fbxTarget, setFbxTarget] = useState('UNITY');
@@ -81,7 +82,7 @@ export function Exporter() {
     const r = await jpost<{ job_id: string }>('/api/exporter/export', {
       tag: selSeq.tag, capture: selSeq.capture, seq: selSeq.seq,
       ma_3d_dir: selSeq.ma_3d_dir, ma_cap_dir: selSeq.ma_cap_dir,
-      formats: chosen, up_axis: upAxis, fps: fps ? Number(fps) : undefined, fbx_target: fbxTarget,
+      formats: chosen, coord_system: coordSystem, up_axis: upAxis, fps: fps ? Number(fps) : undefined, fbx_target: fbxTarget,
     });
     setJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'export' });
   };
@@ -179,11 +180,19 @@ export function Exporter() {
           })}
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-foreground-muted">
-          <label className="flex items-center gap-1.5">Up-axis
-            <select value={upAxis} onChange={e => setUpAxis(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-              <option value="auto">auto</option><option value="z">z</option><option value="y">y</option><option value="x">x</option>
+          <label className="flex items-center gap-1.5">Coordinate system
+            <select value={coordSystem} onChange={e => setCoordSystem(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
+              <option value="keep">Keep original (as captured)</option>
+              <option value="blender">Blender-compatible (Z-up, grounded)</option>
             </select>
           </label>
+          {coordSystem === 'blender' && (
+            <label className="flex items-center gap-1.5">Source up
+              <select value={upAxis} onChange={e => setUpAxis(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
+                <option value="auto">auto</option><option value="z">z</option><option value="y">y</option><option value="x">x</option>
+              </select>
+            </label>
+          )}
           <label className="flex items-center gap-1.5">FPS
             <input value={fps} onChange={e => setFps(e.target.value)} placeholder="auto" className="w-16 bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground" />
           </label>

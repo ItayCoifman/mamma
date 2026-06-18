@@ -118,9 +118,11 @@ def _auto_orient(joints, fps=30.0):
     if conf > 0.93:
         snapped = np.zeros(3); snapped[ax] = np.sign(up[ax]); up = snapped
 
-    R = _rotation_aligning(up, np.array([0.0, 1.0, 0.0]))
     floor = float(np.percentile(feet @ up, 5))  # robust floor coord along up
-    return R, floor, {"axis": "xyz"[ax], "confidence": round(conf, 3), "source": src}
+    return up, floor, {"axis": "xyz"[ax], "confidence": round(conf, 3), "source": src}
+
+
+_AXIS_UNIT = {"x": np.array([1.0, 0, 0]), "y": np.array([0, 1.0, 0]), "z": np.array([0, 0, 1.0])}
 
 
 def _rotvec_to_mat(rotvecs: np.ndarray) -> np.ndarray:
@@ -200,7 +202,8 @@ def _reconstruct_verts(model, pose, betas_row, trans):
 
 
 def export_person(params_path, model_dir, up_axis, fps, out_path,
-                  verts_path=None, validate=True, validate_tol_mm=2.0):
+                  verts_path=None, validate=True, validate_tol_mm=2.0,
+                  coord_system="keep"):
     """Convert one ``smplx_params_body_id-NN.npz`` to an add-on npz at ``out_path``."""
     with np.load(params_path, allow_pickle=True) as d:
         pose = np.asarray(d["smplx_pose"], dtype=np.float64)          # (F,165)
@@ -266,42 +269,55 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
     poses[:, _LHAND] += lhm
     poses[:, _RHAND] += rhm
 
-    # --- rotate global_orient + trans: capture up-axis -> AMASS Y-up ---
-    # global_orient rotates the body about the ROOT joint, so a whole-body rotation
-    # R needs translation offset (R - I) @ J0, where J0 is the (pose-independent,
-    # betas-dependent) rest pelvis. Omitting it rotates about the wrong pivot — a
-    # fixed ~tens-of-cm error.
+    # --- coordinate system (respect the data by default) ---
+    # 'keep' (default): export the fit untouched — original up-axis AND floor, no
+    # rotation. The add-on's AMASS import reproduces MAMMA's Z-up data faithfully.
+    # 'blender': optional extra-fix — rotate the detected up onto Blender's +Z and
+    # drop the feet to Z=0 (grounded). global_orient rotates about the ROOT joint,
+    # so a whole-body rotation R needs the pivot offset (R - I) @ J0 (J0 = rest
+    # pelvis); omitting it rotates about the wrong point.
     import torch
     with torch.no_grad():
         J0 = chosen_model(
             betas=torch.tensor(np.tile(betas_row, (F, 1)), dtype=torch.float32)
         ).joints[0, 0].cpu().numpy().astype(np.float64)
-    floor_y = 0.0
-    if up_axis == "auto":
-        if ref_joints is None:
-            log.warning("  --up-axis auto needs pred_joints; falling back to z")
-            R = _up_axis_rotation("z")
+    R = np.eye(3)
+    floor_axis, floor_val = None, 0.0
+    if coord_system == "blender":
+        if up_axis in ("x", "y", "z"):
+            up_vec, src, conf = _AXIS_UNIT[up_axis], "forced", 1.0
+        elif ref_joints is not None:
+            up_vec, _f, info = _auto_orient(ref_joints, fps=fps)
+            src, conf = info["source"], info["confidence"]
         else:
-            R, floor_y, info = _auto_orient(ref_joints, fps=fps)
-            log.info("  auto-orient: up=%s%s (%s, conf %.2f); floor-to-0",
-                     info["axis"], "" if info["confidence"] > 0.9 else "?",
-                     info["source"], info["confidence"])
+            up_vec, src, conf = _AXIS_UNIT["z"], "default-z", 0.0
+        R = _rotation_aligning(up_vec, np.array([0.0, 0.0, 1.0]))   # data up -> Blender +Z
+        floor_axis = 2
+        log.info("  blender-compat: up=%s (%s, conf %.2f) -> +Z, feet to 0",
+                 "xyz"[int(np.argmax(np.abs(up_vec)))], src, conf)
     else:
-        R = _up_axis_rotation(up_axis)
+        log.info("  keep original coordinate system (no rotation, no floor shift)")
+
     go_mat = _rotvec_to_mat(poses[:, _GLOBAL])             # (F,3,3)
     poses[:, _GLOBAL] = _mat_to_rotvec(R[None] @ go_mat)   # R . global
     trans = trans @ R.T + (R - np.eye(3)) @ J0            # R . (J0 + t) - J0
-    trans[:, 1] -= floor_y                                 # drop floor to Y=0 (auto)
+    if floor_axis is not None:
+        if ref is not None:  # lowest vertices (soles) -> floor, robust to a few outliers
+            floor_val = float(np.percentile((ref @ R.T)[..., floor_axis], 1))
+        elif ref_joints is not None:
+            floor_val = float(np.percentile((ref_joints[:, _J_FEET, :].reshape(-1, 3) @ R.T)[:, floor_axis], 5))
+        trans[:, floor_axis] -= floor_val                 # drop feet to 0 along +Z
 
-    # --- validate the FINAL export end-to-end (bake + rotation + floor) ---
+    # --- validate the FINAL export end-to-end (bake + transform together) ---
     # Run the exported (absolute) poses through a FLAT model; the result must equal
-    # the MAMMA vertices rotated by R and shifted to the floor. Catches bake /
-    # rotation / pivot / floor bugs that the input-param round-trip can't see.
+    # the MAMMA vertices under the same transform. Catches bake/rotation/pivot/floor
+    # bugs the input-param round-trip can't see (identity for 'keep').
     if ref is not None:
         flat_model = chosen_model if chosen_flat else _build_model(model_dir, gender, num_betas, True, F)
         v_out = _reconstruct_verts(flat_model, poses, betas_row, trans)
         expected = ref @ R.T
-        expected[..., 1] -= floor_y
+        if floor_axis is not None:
+            expected[..., floor_axis] -= floor_val
         out_mm = float(np.abs(v_out - expected).max() * 1000.0)
         if out_mm > validate_tol_mm:
             raise RuntimeError(
@@ -319,7 +335,7 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
         mocap_frame_rate=int(fps),
         surface_model_type="smplx",
     )
-    log.info("  wrote %s (poses %s, fps %d, up_axis %s)", out_path, poses.shape, fps, up_axis)
+    log.info("  wrote %s (poses %s, fps %d, coord=%s)", out_path, poses.shape, fps, coord_system)
     return out_path
 
 
@@ -360,9 +376,10 @@ def _blender_export(blender_bin, addon_dir, npz_path, out_prefix, formats, fps, 
     return [f"{out_prefix}.{f}" for f in formats]
 
 
-def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="z",
+def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="auto",
                     ma_cap_dir=None, fps=None, validate=True,
-                    formats=("npz",), blender_bin=None, addon_dir=None, fbx_target="UNITY"):
+                    formats=("npz",), blender_bin=None, addon_dir=None, fbx_target="UNITY",
+                    coord_system="keep"):
     seq_dir = os.path.join(ma_3d_dir, seq_name)
     params = sorted(glob.glob(os.path.join(seq_dir, "smplx_params_body_id-*.npz")))
     if not params:
@@ -392,7 +409,8 @@ def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="z",
         verts = os.path.join(seq_dir, f"verts_joints_body_id-{bid}.npz")
         npz_out = os.path.join(out_dir, f"{seq_name}_body-{bid}_smplx.npz")
         out.append(export_person(p, model_dir, up_axis, fps, npz_out,
-                                 verts_path=verts, validate=validate))
+                                 verts_path=verts, validate=validate,
+                                 coord_system=coord_system))
         if blender_fmts:
             out += _blender_export(bin_, addon_dir, npz_out,
                                    os.path.join(out_dir, f"{seq_name}_body-{bid}"),
@@ -409,10 +427,16 @@ def main(argv=None):
     ap.add_argument("--smplx-models", "--smplx_models",
                     default="data/body_models/smplx_locked_head",
                     help="Folder containing smplx/SMPLX_NEUTRAL.npz (for the hand mean).")
+    ap.add_argument("--coord-system", "--coord_system", default="keep",
+                    choices=["keep", "blender"],
+                    help="'keep' (default) respects the data: export the fit untouched "
+                         "(original up-axis AND floor, no rotation). 'blender' is an "
+                         "optional fix: rotate the detected up onto Blender's +Z and "
+                         "drop the feet to the floor (Z=0).")
     ap.add_argument("--up-axis", "--up_axis", default="auto", choices=["auto", "x", "y", "z"],
-                    help="Capture world up-axis. 'auto' (default) detects up + floor "
-                         "from the motion (foot-contact plane + body-vertical) and "
-                         "drops the feet to Y=0; x/y/z force a fixed axis.")
+                    help="Only used by --coord-system blender: the source up-axis to "
+                         "rotate to +Z. 'auto' (default) detects it from the motion "
+                         "(foot-contact plane + body-vertical); x/y/z force it.")
     ap.add_argument("--ma-cap-dir", "--ma_cap_dir", default=None,
                     help="ma_cap output root, to read fps from <seq>/gt/global.npz.")
     ap.add_argument("--fps", type=int, default=None,
@@ -442,6 +466,7 @@ def main(argv=None):
         up_axis=args.up_axis, ma_cap_dir=args.ma_cap_dir, fps=args.fps,
         validate=not args.no_validate, formats=formats,
         blender_bin=args.blender_bin, addon_dir=args.addon_dir, fbx_target=args.fbx_target,
+        coord_system=args.coord_system,
     )
     print(f"exported {len(outs)} file(s):")
     for o in outs:

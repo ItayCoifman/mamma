@@ -113,6 +113,7 @@ def _run_export(jid: str, spec: dict) -> None:
         cmd = [sys.executable, str(_REPO_ROOT / "optimization" / "export_blender.py"),
                "--ma-3d-dir", spec["ma_3d_dir"], "--seq-name", spec["seq"],
                "--out-dir", str(out_dir), "--formats", ",".join(spec["formats"]),
+               "--coord-system", spec.get("coord_system", "keep"),
                "--up-axis", spec.get("up_axis", "auto"),
                "--fbx-target", spec.get("fbx_target", "UNITY")]
         if spec.get("ma_cap_dir"):
@@ -189,7 +190,7 @@ def register_routes(app) -> None:
             return jsonify({"error": f"missing: {', '.join(missing)}"}), 400
         spec = {k: body.get(k) for k in
                 ("tag", "capture", "seq", "ma_3d_dir", "ma_cap_dir",
-                 "formats", "up_axis", "fps", "fbx_target")}
+                 "formats", "coord_system", "up_axis", "fps", "fbx_target")}
         jid = _new_job("export")
         threading.Thread(target=_run_export, args=(jid, spec), daemon=True).start()
         return jsonify({"job_id": jid}), 201
