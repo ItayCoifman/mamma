@@ -113,7 +113,7 @@ def _run_export(jid: str, spec: dict) -> None:
         cmd = [sys.executable, str(_REPO_ROOT / "optimization" / "export_blender.py"),
                "--ma-3d-dir", spec["ma_3d_dir"], "--seq-name", spec["seq"],
                "--out-dir", str(out_dir), "--formats", ",".join(spec["formats"]),
-               "--up-axis", spec.get("up_axis", "z"),
+               "--up-axis", spec.get("up_axis", "auto"),
                "--fbx-target", spec.get("fbx_target", "UNITY")]
         if spec.get("ma_cap_dir"):
             cmd += ["--ma-cap-dir", spec["ma_cap_dir"]]

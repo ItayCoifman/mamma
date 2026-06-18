@@ -28,7 +28,7 @@ export function Exporter() {
   const [seqs, setSeqs] = useState<Seq[]>([]);
   const [sel, setSel] = useState<string>('');
   const [formats, setFormats] = useState<Record<string, boolean>>({ npz: true, fbx: false, abc: false, bvh: false, usd: false });
-  const [upAxis, setUpAxis] = useState('z');
+  const [upAxis, setUpAxis] = useState('auto');
   const [fps, setFps] = useState('');
   const [fbxTarget, setFbxTarget] = useState('UNITY');
   const [job, setJob] = useState<Job | null>(null);
@@ -181,7 +181,7 @@ export function Exporter() {
         <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-foreground-muted">
           <label className="flex items-center gap-1.5">Up-axis
             <select value={upAxis} onChange={e => setUpAxis(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
-              <option value="z">z</option><option value="y">y</option><option value="x">x</option>
+              <option value="auto">auto</option><option value="z">z</option><option value="y">y</option><option value="x">x</option>
             </select>
           </label>
           <label className="flex items-center gap-1.5">FPS
