@@ -10,11 +10,11 @@ interface Seq { tag: string; capture: string; seq: string; people: number; ma_3d
 interface Job { id: string; kind: string; state: 'running' | 'ready' | 'error'; log_tail: string[]; outputs: string[]; error: string | null; }
 
 const ALL_FORMATS = [
-  { id: 'npz', label: 'npz', hint: 'Add-on native (no Blender)', blender: false },
-  { id: 'fbx', label: 'FBX', hint: 'Rigged, game engines', blender: true },
-  { id: 'abc', label: 'Alembic', hint: 'Vertex cache, render engines', blender: true },
-  { id: 'bvh', label: 'BVH', hint: 'Skeleton motion', blender: true },
-  { id: 'usd', label: 'USD', hint: 'UE5 / Unity / Houdini', blender: true },
+  { id: 'npz', label: 'npz', hint: 'SMPL-X Blender Add-on', blender: false },
+  { id: 'fbx', label: 'FBX', hint: 'Rigged mesh + skeleton', blender: true },
+  { id: 'abc', label: 'Alembic', hint: 'Vertex/geometry cache', blender: true },
+  { id: 'bvh', label: 'BVH', hint: 'Skeleton motion only', blender: true },
+  { id: 'usd', label: 'USD', hint: 'USD scene', blender: true },
 ];
 
 async function jget<T>(url: string): Promise<T> { const r = await fetch(url); return r.json(); }
@@ -200,9 +200,6 @@ export function Exporter() {
             <input value={fps} onChange={e => setFps(e.target.value)} placeholder="auto" className="w-16 bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground" />
           </label>
         </div>
-        <p className="mt-2 text-[11px] text-foreground-faint">
-          The npz keeps your data's own coordinate system; up-axis is auto-detected. FBX/ABC/USD/BVH are built from it via Blender.
-        </p>
       </div>
 
       {/* ④ Export */}
