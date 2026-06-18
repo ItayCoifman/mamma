@@ -180,6 +180,14 @@ sam:
   # before it also get masks. Disable only if you always start from frame 0.
   propagate_reverse: true
 
+  # ── Memory bounding for long / many-camera clips (issue #14) ──────────────
+  # SAM loads the whole decoded video at init_state, so VRAM grows with frame
+  # count. These knobs cap it; masks are identical (offload only moves tensors).
+  offload_video_to_cpu: true       # keep decoded frames on host RAM, stream to GPU (≈free; bounds VRAM)
+  offload_state_to_cpu: auto        # per-frame memory bank on host. auto = on past offload_state_min_frames; or true/false
+  offload_state_min_frames: 1500    # frame count above which "auto" enables offload_state_to_cpu
+  fp16_frames: false                # store decoded frames as float16 (halves frame RAM/VRAM). Opt-in: alters overlay pixels by ≤1 LSB
+
 # ─── Export ───────────────────────────────────────────────────────────────────
 # After mask generation, optionally convert image sequences to MP4 videos
 # and clean up the source images to save disk space.

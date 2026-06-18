@@ -121,6 +121,16 @@ sam:
   # Propagate both forward and backward from anchor frames.
   propagate_reverse: true
 
+  # ── Memory bounding for long / many-camera clips (issue #14) ──────────────
+  # Applies to `--sam_version sam3` (the tracker, which uses init_state). In
+  # `sam3_prompt` mode the session API bounds memory via its own defaults
+  # (max_cond_frames_in_attn=4); the disk-backed mask store bounds host RAM in
+  # all modes regardless. Masks are identical (offload only moves tensors).
+  offload_video_to_cpu: true       # keep decoded frames on host RAM, stream to GPU (≈free; bounds VRAM)
+  offload_state_to_cpu: auto        # per-frame memory bank on host. auto = on past offload_state_min_frames; or true/false
+  offload_state_min_frames: 1500    # frame count above which "auto" enables offload_state_to_cpu
+  fp16_frames: false                # store decoded frames as float16 (halves frame RAM/VRAM). Opt-in: alters overlay pixels by ≤1 LSB
+
 # ─── SAM3 tracking overrides (sam3_prompt mode) ─────────────────────────────
 # Override SAM3's internal tracking config at runtime. These are applied
 # directly to the model after construction (predictor.model.<field>).

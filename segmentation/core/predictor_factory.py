@@ -40,6 +40,19 @@ def clear_frame_filter():
     _frame_name_filter = None
 
 
+# Frame-storage dtype: when True, the patched loaders allocate the decoded-frame
+# tensor as float16 instead of float32, halving the per-clip frame memory (CPU or
+# GPU) at a negligible accuracy cost (per the SAM2 maintainers). Opt-in via the
+# ``sam.fp16_frames`` config; default off keeps outputs byte-identical. (issue #14)
+_frame_store_fp16 = False
+
+
+def set_frame_storage_fp16(enabled: bool):
+    """Enable/disable float16 storage of the decoded-frame tensor."""
+    global _frame_store_fp16
+    _frame_store_fp16 = bool(enabled)
+
+
 def _patch_sam2_png_support():
     """
     Monkey-patch sam2.utils.misc to support PNG images and robust frame sorting.
@@ -115,8 +128,9 @@ def _patch_sam2_png_support():
         if num_frames == 0:
             raise RuntimeError(f"no images found in {jpg_folder}")
         img_paths = [os.path.join(jpg_folder, frame_name) for frame_name in frame_names]
-        img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
-        img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+        store_dtype = torch.float16 if _frame_store_fp16 else torch.float32
+        img_mean = torch.tensor(img_mean, dtype=store_dtype)[:, None, None]
+        img_std = torch.tensor(img_std, dtype=store_dtype)[:, None, None]
 
         if async_loading_frames:
             lazy_images = sam2_misc.AsyncVideoFrameLoader(
@@ -129,7 +143,7 @@ def _patch_sam2_png_support():
             )
             return lazy_images, lazy_images.video_height, lazy_images.video_width
 
-        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
+        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=store_dtype)
         for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG/PNG)")):
             images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
         if not offload_video_to_cpu:
@@ -214,8 +228,9 @@ def _patch_sam3_png_support():
         if num_frames == 0:
             raise RuntimeError(f"no images found in {jpg_folder}")
         img_paths = [os.path.join(jpg_folder, frame_name) for frame_name in frame_names]
-        img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
-        img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+        store_dtype = torch.float16 if _frame_store_fp16 else torch.float32
+        img_mean = torch.tensor(img_mean, dtype=store_dtype)[:, None, None]
+        img_std = torch.tensor(img_std, dtype=store_dtype)[:, None, None]
 
         if async_loading_frames:
             lazy_images = sam3_misc.AsyncVideoFrameLoader(
@@ -224,7 +239,7 @@ def _patch_sam3_png_support():
             )
             return lazy_images, lazy_images.video_height, lazy_images.video_width
 
-        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
+        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=store_dtype)
         for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG/PNG)")):
             images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
         if not offload_video_to_cpu:
@@ -521,11 +536,17 @@ class _Sam3PromptVideoAdapter:
         )
         return self._parse_outputs(response.get("outputs"))
 
-    def propagate(self):
-        """Propagate all prompts bidirectionally. Returns {frame_idx: {obj_id: mask}}."""
-        import torch
+    def propagate(self, sink=None):
+        """Propagate all prompts bidirectionally.
+
+        If ``sink`` is provided it is called as ``sink(frame_idx, {obj_id: mask})``
+        for each frame and nothing is accumulated — bounded memory, used by the
+        pipeline to stream masks straight to a disk-backed store (issue #14).
+        Otherwise the full ``{frame_idx: {obj_id: mask}}`` dict is returned
+        (back-compatible).
+        """
         import numpy as np
-        video_segments = {}
+        video_segments = {} if sink is None else None
         # As used in https://github.com/facebookresearch/sam3/blob/main/examples/sam3_video_predictor_example.ipynb
         for response in self._predictor.handle_stream_request(
             request=dict(
@@ -538,11 +559,15 @@ class _Sam3PromptVideoAdapter:
             if outputs is None:
                 continue
             parsed = self._parse_outputs(outputs)
-            video_segments[frame_idx] = {
+            masks = {
                 oid: (mask.cpu().numpy() if hasattr(mask, 'cpu') else np.asarray(mask))
                 for oid, mask in parsed["masks"].items()
             }
-        return dict(sorted(video_segments.items()))
+            if sink is not None:
+                sink(frame_idx, masks)
+            else:
+                video_segments[frame_idx] = masks
+        return None if sink is not None else dict(sorted(video_segments.items()))
 
     def reset_session(self):
         """Reset the current session."""
