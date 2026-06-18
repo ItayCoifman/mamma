@@ -54,6 +54,83 @@ def _up_axis_rotation(up_axis: str) -> np.ndarray:
     raise ValueError(f"up_axis must be x/y/z, got {up_axis!r}")
 
 
+# SMPL-X body joint indices: head, and feet (ankles + foot tips).
+_J_HEAD, _J_FEET = 15, (7, 8, 10, 11)
+
+
+def _rotation_aligning(a, b):
+    """Shortest-arc 3x3 rotation mapping unit vector ``a`` onto unit vector ``b``."""
+    a = a / (np.linalg.norm(a) + 1e-12)
+    b = b / (np.linalg.norm(b) + 1e-12)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    if c < -0.999999:  # antiparallel: 180deg about any perpendicular axis
+        p = np.array([1.0, 0, 0]) if abs(a[0]) < 0.9 else np.array([0, 1.0, 0])
+        v = np.cross(a, p); v /= np.linalg.norm(v)
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    if c < -0.999999:
+        return np.eye(3) + 2.0 * vx @ vx
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
+
+
+def _auto_orient(joints, fps=30.0):
+    """Detect up + floor from SMPL-X joints ``(F, J, 3)`` in the capture's world.
+
+    Fuses, robustly: foot-contact plane (E1) + body-vertical median (E3) +
+    free-fall gravity (E2, only when airborne frames exist). Returns
+    ``(R, floor_along_up, info)`` where R maps the detected up onto +Y. Pure numpy,
+    posture-agnostic (jumps/cartwheels/lying are minority outliers, not the answer).
+    """
+    J = np.asarray(joints, dtype=np.float64)
+    feet = J[:, _J_FEET, :].reshape(-1, 3)
+    feet_c = J[:, _J_FEET, :].mean(1)
+    centroid = J.reshape(-1, 3).mean(0)
+
+    # E3 body-vertical: robust median of (head - feet) over frames.
+    bv = J[:, _J_HEAD, :] - feet_c
+    up = np.median(bv / (np.linalg.norm(bv, axis=1, keepdims=True) + 1e-12), axis=0)
+    src = "body-vertical"
+
+    # E1 foot-contact plane: smallest-variance direction of the foot cloud, used
+    # only when the feet are spread out and lie near a plane (planar + moving).
+    try:
+        _, sv, vt = np.linalg.svd(feet - feet.mean(0), full_matrices=False)
+        if sv[0] > 0.1 and sv[-1] / sv[0] < 0.25:
+            n = vt[-1]
+            up = n if np.dot(n, up) >= 0 else -n
+            src = "foot-plane"
+    except np.linalg.LinAlgError:
+        pass
+
+    # E2 free-fall gravity: COM acceleration during airborne frames is g (down).
+    if J.shape[0] >= 5:
+        com = J.mean(1)
+        a = (com[2:] - 2 * com[1:-1] + com[:-2]) * (fps * fps)
+        amag = np.linalg.norm(a, axis=1)
+        air = (amag > 7.0) & (amag < 13.0)               # |a| ~ 9.8 m/s^2
+        if air.sum() >= 3:
+            g = np.median(a[air], axis=0)
+            if 8.0 < np.linalg.norm(g) < 11.5 and abs(np.dot(g / np.linalg.norm(g), up)) > 0.6:
+                up_g = -g / np.linalg.norm(g)
+                up = up_g if np.dot(up_g, up) >= 0 else -up_g
+                src += "+freefall"
+
+    # Sign: up points from the floor toward the body centroid.
+    if np.dot(centroid - feet_c.mean(0), up) < 0:
+        up = -up
+    up = up / (np.linalg.norm(up) + 1e-12)
+
+    # Snap to the nearest world axis when nearly axis-aligned (typical rigs).
+    ax = int(np.argmax(np.abs(up)))
+    conf = float(abs(up[ax]))
+    if conf > 0.93:
+        snapped = np.zeros(3); snapped[ax] = np.sign(up[ax]); up = snapped
+
+    R = _rotation_aligning(up, np.array([0.0, 1.0, 0.0]))
+    floor = float(np.percentile(feet @ up, 5))  # robust floor coord along up
+    return R, floor, {"axis": "xyz"[ax], "confidence": round(conf, 3), "source": src}
+
+
 def _rotvec_to_mat(rotvecs: np.ndarray) -> np.ndarray:
     """(N,3) axis-angle -> (N,3,3) rotation matrices."""
     try:
@@ -148,9 +225,13 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
     betas_row = betas.reshape(-1)[:num_betas]
 
     ref = None
-    if validate and verts_path and os.path.exists(verts_path):
+    ref_joints = None
+    if verts_path and os.path.exists(verts_path):
         with np.load(verts_path, allow_pickle=True) as vd:
-            ref = np.asarray(vd["pred_vertices"], dtype=np.float64)
+            if validate:
+                ref = np.asarray(vd["pred_vertices"], dtype=np.float64)
+            if "pred_joints" in vd.files:
+                ref_joints = np.asarray(vd["pred_joints"], dtype=np.float64)
 
     # Determine flat_hand_mean. The fit's convention is whatever reconstructs the
     # saved vertices — so when they're available we AUTO-DETECT it (the stamped
@@ -203,22 +284,36 @@ def export_person(params_path, model_dir, up_axis, fps, out_path,
         J0 = chosen_model(
             betas=torch.tensor(np.tile(betas_row, (F, 1)), dtype=torch.float32)
         ).joints[0, 0].cpu().numpy().astype(np.float64)
-    R = _up_axis_rotation(up_axis)
+    floor_y = 0.0
+    if up_axis == "auto":
+        if ref_joints is None:
+            log.warning("  --up-axis auto needs pred_joints; falling back to z")
+            R = _up_axis_rotation("z")
+        else:
+            R, floor_y, info = _auto_orient(ref_joints, fps=fps)
+            log.info("  auto-orient: up=%s%s (%s, conf %.2f); floor-to-0",
+                     info["axis"], "" if info["confidence"] > 0.9 else "?",
+                     info["source"], info["confidence"])
+    else:
+        R = _up_axis_rotation(up_axis)
     go_mat = _rotvec_to_mat(poses[:, _GLOBAL])             # (F,3,3)
     poses[:, _GLOBAL] = _mat_to_rotvec(R[None] @ go_mat)   # R . global
     trans = trans @ R.T + (R - np.eye(3)) @ J0            # R . (J0 + t) - J0
+    trans[:, 1] -= floor_y                                 # drop floor to Y=0 (auto)
 
-    # --- validate the FINAL export end-to-end (bake + rotation together) ---
+    # --- validate the FINAL export end-to-end (bake + rotation + floor) ---
     # Run the exported (absolute) poses through a FLAT model; the result must equal
-    # the MAMMA vertices rotated by R. Catches bake/rotation/pivot bugs that the
-    # input-param round-trip above cannot see.
+    # the MAMMA vertices rotated by R and shifted to the floor. Catches bake /
+    # rotation / pivot / floor bugs that the input-param round-trip can't see.
     if ref is not None:
         flat_model = chosen_model if chosen_flat else _build_model(model_dir, gender, num_betas, True, F)
         v_out = _reconstruct_verts(flat_model, poses, betas_row, trans)
-        out_mm = float(np.abs(v_out - ref @ R.T).max() * 1000.0)
+        expected = ref @ R.T
+        expected[..., 1] -= floor_y
+        out_mm = float(np.abs(v_out - expected).max() * 1000.0)
         if out_mm > validate_tol_mm:
             raise RuntimeError(
-                f"{params_path}: exported npz does not reproduce R@verts "
+                f"{params_path}: exported npz does not reproduce the expected transform "
                 f"({out_mm:.3f} mm > {validate_tol_mm} mm) — bake/rotation bug; refusing to export")
         log.info("  export round-trip OK: %.3f mm", out_mm)
 
@@ -322,8 +417,10 @@ def main(argv=None):
     ap.add_argument("--smplx-models", "--smplx_models",
                     default="data/body_models/smplx_locked_head",
                     help="Folder containing smplx/SMPLX_NEUTRAL.npz (for the hand mean).")
-    ap.add_argument("--up-axis", "--up_axis", default="z", choices=["x", "y", "z"],
-                    help="World up-axis of the capture (optional override). Default z.")
+    ap.add_argument("--up-axis", "--up_axis", default="auto", choices=["auto", "x", "y", "z"],
+                    help="Capture world up-axis. 'auto' (default) detects up + floor "
+                         "from the motion (foot-plane + body-vertical + free-fall) and "
+                         "drops the feet to Y=0; x/y/z force a fixed axis.")
     ap.add_argument("--ma-cap-dir", "--ma_cap_dir", default=None,
                     help="ma_cap output root, to read fps from <seq>/gt/global.npz.")
     ap.add_argument("--fps", type=int, default=None,

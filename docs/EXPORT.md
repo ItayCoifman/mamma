@@ -68,7 +68,7 @@ with a warning — it never fails the run for a missing optional dependency.
 | flag | meaning |
 |---|---|
 | `--formats` | comma list of `npz,fbx,abc,bvh,usd` (default `npz`) |
-| `--up-axis` | capture world up-axis (`x`/`y`/`z`, default `z`) → converted to the add-on's AMASS Y-up |
+| `--up-axis` | `auto` (default) detects up + floor from the motion and drops feet to Y=0; or force `x`/`y`/`z`. Converted to the add-on's AMASS Y-up |
 | `--fps` | override `mocap_frame_rate` (else read from ma_cap's `global.npz`, else 30) |
 | `--fbx-target` | `UNITY` (≈ generic, default) or `UNREAL` (×100 scale) |
 | `--smplx-models` | SMPL-X model folder (default `data/body_models/smplx_locked_head`) |
