@@ -102,18 +102,10 @@ def _auto_orient(joints, fps=30.0):
     except np.linalg.LinAlgError:
         pass
 
-    # E2 free-fall gravity: COM acceleration during airborne frames is g (down).
-    if J.shape[0] >= 5:
-        com = J.mean(1)
-        a = (com[2:] - 2 * com[1:-1] + com[:-2]) * (fps * fps)
-        amag = np.linalg.norm(a, axis=1)
-        air = (amag > 7.0) & (amag < 13.0)               # |a| ~ 9.8 m/s^2
-        if air.sum() >= 3:
-            g = np.median(a[air], axis=0)
-            if 8.0 < np.linalg.norm(g) < 11.5 and abs(np.dot(g / np.linalg.norm(g), up)) > 0.6:
-                up_g = -g / np.linalg.norm(g)
-                up = up_g if np.dot(up_g, up) >= 0 else -up_g
-                src += "+freefall"
+    # (Free-fall gravity from COM acceleration was evaluated and dropped: on real
+    # captured motion — incl. breakdancing — clean ballistic flight is rare/short
+    # while push-off/impact frames also hit ~9.8 m/s^2 in scattered directions, so
+    # it either abstains or degrades the foot-plane estimate. E1+E3 are robust.)
 
     # Sign: up points from the floor toward the body centroid.
     if np.dot(centroid - feet_c.mean(0), up) < 0:
@@ -419,7 +411,7 @@ def main(argv=None):
                     help="Folder containing smplx/SMPLX_NEUTRAL.npz (for the hand mean).")
     ap.add_argument("--up-axis", "--up_axis", default="auto", choices=["auto", "x", "y", "z"],
                     help="Capture world up-axis. 'auto' (default) detects up + floor "
-                         "from the motion (foot-plane + body-vertical + free-fall) and "
+                         "from the motion (foot-contact plane + body-vertical) and "
                          "drops the feet to Y=0; x/y/z force a fixed axis.")
     ap.add_argument("--ma-cap-dir", "--ma_cap_dir", default=None,
                     help="ma_cap output root, to read fps from <seq>/gt/global.npz.")
