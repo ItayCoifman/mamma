@@ -30,6 +30,7 @@ export function Exporter() {
   const [formats, setFormats] = useState<Record<string, boolean>>({ npz: true, fbx: false, abc: false, bvh: false, usd: false });
   const [ground, setGround] = useState(true);
   const [unit, setUnit] = useState('m');
+  const [blenderFormat, setBlenderFormat] = useState('auto');
   const [fps, setFps] = useState('');
   const [job, setJob] = useState<Job | null>(null);
   const [dlJob, setDlJob] = useState<Job | null>(null);
@@ -81,7 +82,7 @@ export function Exporter() {
     const r = await jpost<{ job_id: string }>('/api/exporter/export', {
       tag: selSeq.tag, capture: selSeq.capture, seq: selSeq.seq,
       ma_3d_dir: selSeq.ma_3d_dir, ma_cap_dir: selSeq.ma_cap_dir,
-      formats: chosen, ground, unit, fps: fps ? Number(fps) : undefined,
+      formats: chosen, ground, unit, blender_format: blenderFormat, fps: fps ? Number(fps) : undefined,
     });
     setJob({ id: r.job_id, state: 'running', log_tail: [], outputs: [], error: null, kind: 'export' });
   };
@@ -186,6 +187,13 @@ export function Exporter() {
           <label className="flex items-center gap-1.5" title="Units for FBX/ABC/USD/BVH. Meters for Blender/Unity/Maya; centimeters for Unreal. The npz stays in meters.">Unit
             <select value={unit} onChange={e => setUnit(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
               <option value="m">meters</option><option value="cm">centimeters</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5" title="Prepares the npz so the add-on's Add Animation imports it upright with this Format. Auto keeps your data's axes and tells you which Format to pick.">Blender import
+            <select value={blenderFormat} onChange={e => setBlenderFormat(e.target.value)} className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-foreground">
+              <option value="auto">Auto (keep data axes)</option>
+              <option value="amass">AMASS (Z-up)</option>
+              <option value="smplx">SMPL-X (Y-up)</option>
             </select>
           </label>
           <label className="flex items-center gap-1.5">FPS

@@ -191,10 +191,19 @@ def _write_addon_npz(out_path, poses, betas_row, trans, gender, fps):
              mocap_frame_rate=int(fps), surface_model_type="smplx")
 
 
+def _rotate_params(poses, trans, R, J0):
+    """Apply world rotation R to a whole-body animation (global_orient + trans).
+    global_orient rotates about the root, so trans needs the pivot offset (R-I)@J0."""
+    p = poses.copy()
+    p[:, _GLOBAL] = _mat_to_rotvec(R[None] @ _rotvec_to_mat(poses[:, _GLOBAL]))
+    t = trans @ R.T + (R - np.eye(3)) @ J0
+    return p, t
+
+
 def export_person(params_path, model_dir, fps, out_path,
                   verts_path=None, validate=True, validate_tol_mm=2.0,
-                  ground=True, up_axis="auto", write_blender_npz=False,
-                  blender_npz_path=None):
+                  ground=True, up_axis="auto", blender_format="auto",
+                  write_blender_npz=False, blender_npz_path=None):
     """Convert one ``smplx_params_body_id-NN.npz`` to an add-on npz at ``out_path``."""
     with np.load(params_path, allow_pickle=True) as d:
         pose = np.asarray(d["smplx_pose"], dtype=np.float64)          # (F,165)
@@ -260,10 +269,7 @@ def export_person(params_path, model_dir, fps, out_path,
     poses[:, _LHAND] += lhm
     poses[:, _RHAND] += rhm
 
-    # --- RESPECT THE DATA: the faithful npz keeps the fit's own axes (any up) ---
-    # We never rotate it. The only optional change is floor grounding (a pure
-    # translation along the up-axis). The up-axis is auto-detected from the SMPL-X
-    # joints, so it works for any coordinate system (not just Z-up).
+    # --- detect the source up-axis (works for any coordinate system, not just Z) ---
     if up_axis in ("x", "y", "z"):
         up_vec, up_idx, src, conf = _AXIS_UNIT[up_axis], {"x": 0, "y": 1, "z": 2}[up_axis], "forced", 1.0
     elif ref_joints is not None:
@@ -272,9 +278,15 @@ def export_person(params_path, model_dir, fps, out_path,
     else:
         up_vec, up_idx, src, conf = _AXIS_UNIT["z"], 2, "default-z", 0.0
     src_up = "xyz"[up_idx]
-    log.info("  up-axis=%s (%s, conf %.2f); coordinate system kept as captured", src_up, src, conf)
 
-    # Floor grounding (optional): shift translation so the soles rest at 0 along up.
+    import torch
+    with torch.no_grad():
+        J0 = chosen_model(betas=torch.tensor(np.tile(betas_row, (F, 1)), dtype=torch.float32)
+                          ).joints[0, 0].cpu().numpy().astype(np.float64)
+
+    # Floor grounding (optional) is done in the SOURCE frame first (a pure
+    # translation along the up-axis), so both the user npz and the Z-up geometry
+    # npz inherit feet-on-floor regardless of the orientation applied next.
     floor_val = 0.0
     if ground:
         if ref is not None:
@@ -283,47 +295,52 @@ def export_person(params_path, model_dir, fps, out_path,
             floor_val = float(np.percentile(ref_joints[:, _J_FEET, up_idx], 5))
         trans = trans.copy()
         trans[:, up_idx] -= floor_val
-        log.info("  grounded feet to 0 along %s (shift %.3f m)", src_up, floor_val)
 
-    # Validate the faithful export end-to-end (bake + grounding; no rotation).
+    # --- orient the npz so it imports UPRIGHT with the chosen add-on Format ---
+    # AMASS reproduces the npz frame as-is (needs a Z-up npz); SMPL-X adds a fixed
+    # +90deg X (needs a Y-up npz). 'auto' keeps the data's own axes and reports the
+    # matching Format.
+    if blender_format == "amass":
+        R_user, import_fmt = _rotation_aligning(up_vec, _AXIS_UNIT["z"]), "AMASS"
+    elif blender_format == "smplx":
+        R_user, import_fmt = _rotation_aligning(up_vec, _AXIS_UNIT["y"]), "SMPL-X"
+    else:  # auto: keep the data's own axes
+        R_user, import_fmt = np.eye(3), {"z": "AMASS", "y": "SMPL-X"}.get(src_up, "AMASS")
+    poses_u, trans_u = _rotate_params(poses, trans, R_user, J0)
+    log.info("  up-axis=%s (%s, conf %.2f); npz prepared for Blender Format=%s%s",
+             src_up, src, conf, import_fmt, ", grounded" if ground else "")
+
+    # Validate the user npz end-to-end (bake + grounding + orientation).
     if ref is not None:
         flat_model = chosen_model if chosen_flat else _build_model(model_dir, gender, num_betas, True, F)
-        v_out = _reconstruct_verts(flat_model, poses, betas_row, trans)
+        v_out = _reconstruct_verts(flat_model, poses_u, betas_row, trans_u)
         expected = ref.copy()
         if ground:
             expected[..., up_idx] -= floor_val
+        expected = expected @ R_user.T
         out_mm = float(np.abs(v_out - expected).max() * 1000.0)
         if out_mm > validate_tol_mm:
             raise RuntimeError(
                 f"{params_path}: exported npz does not reproduce the fit "
-                f"({out_mm:.3f} mm > {validate_tol_mm} mm) — bake/ground bug; refusing to export")
+                f"({out_mm:.3f} mm > {validate_tol_mm} mm) — bake/orient bug; refusing to export")
         log.info("  export round-trip OK: %.3f mm", out_mm)
 
-    _write_addon_npz(out_path, poses, betas_row, trans, gender, fps)
-    log.info("  wrote %s (poses %s, fps %d, up=%s%s)", out_path, poses.shape, fps,
-             src_up, ", grounded" if ground else "")
+    _write_addon_npz(out_path, poses_u, betas_row, trans_u, gender, fps)
+    log.info("  wrote %s -> import in Blender with Format=%s", out_path, import_fmt)
 
-    # --- Blender geometry npz: normalize the source up onto Blender +Z so the
-    # rigged FBX/ABC/BVH/USD come out correct for ANY input axes (identity when
-    # the data is already Z-up). global_orient rotates about the root joint, so the
-    # whole-body rotation R needs the pivot offset (R - I) @ J0 (rest pelvis). ---
+    # --- Blender geometry npz: always normalize the source up onto +Z so the rigged
+    # FBX/ABC/BVH/USD are correct for ANY input axes. Reuse the user npz when it is
+    # already that Z-up file. ---
     blender_out = None
     if write_blender_npz:
-        if src_up == "z":
+        R_z = _rotation_aligning(up_vec, _AXIS_UNIT["z"])
+        if np.allclose(R_user, R_z):
             blender_out = out_path
         else:
-            import torch
-            with torch.no_grad():
-                J0 = chosen_model(betas=torch.tensor(np.tile(betas_row, (F, 1)), dtype=torch.float32)
-                                  ).joints[0, 0].cpu().numpy().astype(np.float64)
-            R = _rotation_aligning(up_vec, np.array([0.0, 0.0, 1.0]))   # source up -> +Z
-            poses_z = poses.copy()
-            poses_z[:, _GLOBAL] = _mat_to_rotvec(R[None] @ _rotvec_to_mat(poses[:, _GLOBAL]))
-            trans_z = trans @ R.T + (R - np.eye(3)) @ J0
+            poses_z, trans_z = _rotate_params(poses, trans, R_z, J0)
             _write_addon_npz(blender_npz_path, poses_z, betas_row, trans_z, gender, fps)
             blender_out = blender_npz_path
-            log.info("  wrote Blender Z-up npz (%s->Z): %s", src_up, blender_npz_path)
-    return out_path, blender_out, src_up
+    return out_path, blender_out, src_up, import_fmt
 
 
 _BLENDER_FORMATS = ("fbx", "abc", "bvh", "usd")  # need Blender; npz is pure-Python
@@ -367,7 +384,7 @@ def _blender_export(blender_bin, addon_dir, npz_path, out_prefix, formats, fps, 
 def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="auto",
                     ma_cap_dir=None, fps=None, validate=True,
                     formats=("npz",), blender_bin=None, addon_dir=None,
-                    unit="m", ground=True):
+                    unit="m", ground=True, blender_format="auto"):
     seq_dir = os.path.join(ma_3d_dir, seq_name)
     params = sorted(glob.glob(os.path.join(seq_dir, "smplx_params_body_id-*.npz")))
     if not params:
@@ -397,9 +414,9 @@ def export_sequence(ma_3d_dir, seq_name, model_dir, out_dir, up_axis="auto",
         verts = os.path.join(seq_dir, f"verts_joints_body_id-{bid}.npz")
         npz_out = os.path.join(out_dir, f"{seq_name}_body-{bid}_smplx.npz")
         bz = os.path.join(out_dir, f".{seq_name}_body-{bid}_blenderZ.npz")  # temp Z-up
-        faithful, bnpz, _src = export_person(
+        faithful, bnpz, _src, _fmt = export_person(
             p, model_dir, fps, npz_out, verts_path=verts, validate=validate,
-            ground=ground, up_axis=up_axis,
+            ground=ground, up_axis=up_axis, blender_format=blender_format,
             write_blender_npz=bool(blender_fmts), blender_npz_path=bz)
         out.append(faithful)
         if blender_fmts and bnpz:
@@ -420,6 +437,12 @@ def main(argv=None):
     ap.add_argument("--smplx-models", "--smplx_models",
                     default="data/body_models/smplx_locked_head",
                     help="Folder containing smplx/SMPLX_NEUTRAL.npz (for the hand mean).")
+    ap.add_argument("--blender-format", "--blender_format", default="auto",
+                    choices=["auto", "amass", "smplx"],
+                    help="Which add-on import Format the npz is prepared for. 'auto' "
+                         "(default) keeps the data's own axes and reports the matching "
+                         "Format; 'amass' orients the npz Z-up (import as AMASS); "
+                         "'smplx' orients it Y-up (import as SMPL-X). Both import upright.")
     ap.add_argument("--unit", default="m", choices=["m", "cm"],
                     help="Units for the rigged formats (FBX/ABC/USD/BVH): m (meters, "
                          "default — Blender/Unity/Maya) or cm (centimeters — Unreal). "
@@ -458,7 +481,7 @@ def main(argv=None):
         up_axis=args.up_axis, ma_cap_dir=args.ma_cap_dir, fps=args.fps,
         validate=not args.no_validate, formats=formats,
         blender_bin=args.blender_bin, addon_dir=args.addon_dir,
-        unit=args.unit, ground=args.ground,
+        unit=args.unit, ground=args.ground, blender_format=args.blender_format,
     )
     print(f"exported {len(outs)} file(s):")
     for o in outs:

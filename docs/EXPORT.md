@@ -68,6 +68,7 @@ with a warning — it never fails the run for a missing optional dependency.
 | flag | meaning |
 |---|---|
 | `--formats` | comma list of `npz,fbx,abc,bvh,usd` (default `npz`) |
+| `--blender-format` | which add-on import **Format** the npz is prepared for so it imports **upright**: `auto` (default — keeps your data's axes, reports the matching Format), `amass` (orients npz Z-up → import as *AMASS*), `smplx` (orients npz Y-up → import as *SMPL-X*) |
 | `--unit` | units for FBX/ABC/USD/BVH: `m` (meters, default — Blender/Unity/Maya) or `cm` (centimeters — Unreal). The npz is always meters (SMPL-X convention) |
 | `--ground` / `--no-ground` | drop the feet to the floor (0 along the auto-detected up-axis). On by default; `--no-ground` keeps the fit's exact translation. **Never changes the axes** |
 | `--up-axis` | source up-axis for grounding + geometry normalization. `auto` (default) detects it (foot-plane + body-vertical); `x`/`y`/`z` force it |
@@ -92,9 +93,11 @@ with a warning — it never fails the run for a missing optional dependency.
 
 ## Viewing in Blender
 
-Open Blender (the add-on installed normally), use **Add Animation** on the `.npz`,
-or import the `.fbx`/`.abc`/`.usd` directly. `--unit cm` pre-scales the rigged
-formats (×100) for Unreal; `--unit m` keeps meters (Blender/Unity/Maya).
+Open Blender (the add-on installed normally), use **Add Animation** on the `.npz`
+with the **Format** the export reports (`--blender-format auto` logs it; `amass`/
+`smplx` make it explicit) — the body imports upright + grounded. Or import the
+`.fbx`/`.abc`/`.usd` directly. `--unit cm` pre-scales the rigged formats (×100) for
+Unreal; `--unit m` keeps meters (Blender/Unity/Maya).
 
 > **Tip:** the `.npz` is the most faithful (it's the add-on's own format and is
 > round-trip-validated). FBX/ABC/etc. are derived from it through Blender.
