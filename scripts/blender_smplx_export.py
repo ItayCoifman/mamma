@@ -50,22 +50,6 @@ def _reset_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
 
-def _add_body():
-    wm = bpy.context.window_manager
-    t = wm.smplx_tool
-    t.body_model = "smplx"
-    t.smplx_version = "locked_head"
-    t.smplx_gender = "neutral"
-    t.smplx_uv = "UV_2023"
-    bpy.ops.scene.smplx_add_gender()
-    # The add-model op leaves the new mesh active+selected.
-    mesh = bpy.context.view_layer.objects.active
-    if mesh is None or mesh.type != "MESH":
-        mesh = next((o for o in bpy.data.objects if o.type == "MESH"), None)
-    arm = mesh.find_armature() if mesh else None
-    return mesh, arm
-
-
 def _select(objs, active):
     bpy.ops.object.select_all(action="DESELECT")
     for o in objs:
@@ -80,18 +64,25 @@ def main():
     _reset_scene()
     _enable_addon(a.addon_dir)
 
-    mesh, arm = _add_body()
-    print(f"[blender_export] added body: mesh={mesh.name if mesh else None} arm={arm.name if arm else None}")
-
-    # Import our animation (AMASS Y-up, hand mean baked -> FLAT).
-    _select([mesh], mesh)
+    # smplx_add_animation ADDS the model AND animates it (it calls
+    # scene.smplx_add_gender internally). Do NOT add a body first or you get a
+    # duplicate and export the wrong, un-animated one. Set the model variant +
+    # UV first (the add-model reads them), like the reference does.
+    wm = bpy.context.window_manager
+    wm.smplx_tool.smplx_version = "locked_head"
+    wm.smplx_tool.smplx_uv = "UV_2023"
     bpy.ops.object.smplx_add_animation(
         filepath=os.path.abspath(a.npz),
-        anim_format="AMASS",
-        hand_reference="FLAT",
+        anim_format="AMASS",            # our npz is AMASS Y-up
+        hand_reference="FLAT",          # relaxed-hand mean already baked in
         target_framerate=a.fps,
+        keyframe_corrective_pose_weights=True,  # keyframe pose-correctives per frame
     )
-    print(f"[blender_export] imported animation from {a.npz}")
+    mesh = bpy.context.view_layer.objects.active
+    arm = mesh.parent if mesh else None
+    sc = bpy.context.scene
+    print(f"[blender_export] animated body: mesh={mesh.name if mesh else None} "
+          f"arm={arm.name if arm else None} frames={sc.frame_start}-{sc.frame_end}")
 
     out = os.path.abspath(a.out_prefix)
     os.makedirs(os.path.dirname(out), exist_ok=True)
