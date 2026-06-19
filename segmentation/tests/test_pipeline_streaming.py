@@ -59,21 +59,80 @@ def test_crop_summary_builds_img_bbx_regardless_of_viz(tmp_path):
     assert np.array_equal(d_off[0]["img_bbx"][0], d_on[0]["img_bbx"][0])  # matching input identical
 
 
-def test_drop_full_frames_keeps_matching_fields():
+def test_compute_centroids_matches_mask_means():
     seg = _make_segmenter({})
-    d = {0: {"img": [np.zeros((4, 4, 3), np.uint8)],
-             "img_bbx": [np.zeros((2, 2, 3), np.uint8)],
-             "mask": [np.zeros((4, 4), bool)], "frame": [0], "bbox": [np.zeros(4)]}}
-    seg._drop_full_frames(d)
-    assert "img" not in d[0]                                   # full frames freed
-    for fld in ("img_bbx", "mask", "frame", "bbox"):          # matching fields retained
-        assert fld in d[0]
+    m = np.zeros((10, 10), bool); m[2:6, 4:8] = True          # centroid ~ (5.5, 3.5)
+    d = {0: {"mask": [m], "frame": [3]}}
+    seg._compute_centroids(d)
+    cx, cy = d[0]["centroid_xy"][0]
+    ys, xs = np.where(m)
+    assert abs(cx - xs.mean()) < 1e-6 and abs(cy - ys.mean()) < 1e-6
 
 
-def test_debug_crop_summary_flag():
+def test_slim_mask_record_drops_heavy_keeps_light():
+    seg = _make_segmenter({})
+    d = {0: {"img": [np.zeros((4, 4, 3), np.uint8)], "mask": [np.zeros((4, 4), bool)],
+             "img_bbx": [np.zeros((2, 2, 3), np.uint8)], "features": [1],
+             "frame": [0], "bbox": [np.zeros(4)], "centroid_xy": [[1.0, 2.0]]}}
+    seg._slim_mask_record(d)
+    assert "img" not in d[0] and "mask" not in d[0]            # heavy fields freed
+    for fld in ("img_bbx", "features", "frame", "bbox", "centroid_xy"):
+        assert fld in d[0]                                     # matching fields retained
+
+
+def test_reference_point_prefers_centroid_then_mask():
+    seg = _make_segmenter({})
+    # slim record: centroid_xy present, no mask
+    slim = {"frame": [0, 10], "centroid_xy": [[1.0, 2.0], [3.0, 4.0]]}
+    p = seg._reference_point_from_mask_data(slim, 9)           # nearest -> idx 1
+    assert list(p[:2]) == [3.0, 4.0]
+    # legacy record: no centroid, falls back to mask centroid
+    m = np.zeros((8, 8), bool); m[0:4, 0:2] = True
+    legacy = {"frame": [0], "mask": [m]}
+    p2 = seg._reference_point_from_mask_data(legacy, 0)
+    ys, xs = np.where(m)
+    assert abs(p2[0] - xs.mean()) < 1e-6 and abs(p2[1] - ys.mean()) < 1e-6
+
+
+def test_compute_clip_features_skips_when_present():
+    import torch as _t
+    seg = _make_segmenter({})
+    feats = _t.ones((3, 8))
+    d = {0: {"features": feats, "img_bbx": []}}               # already has features
+    seg.compute_clip_features(d)                               # must not overwrite/clear
+    assert d[0]["features"] is feats
+
+
+def test_debug_flags():
     assert _make_segmenter({"exports": {"debug_crop_summary": True}})._debug_crop_summary() is True
     assert _make_segmenter({"exports": {}})._debug_crop_summary() is False
-    assert _make_segmenter({})._debug_crop_summary() is False
+    assert _make_segmenter({"exports": {"debug_full_masks_npy": True}})._debug_full_masks_npy() is True
+    assert _make_segmenter({})._debug_full_masks_npy() is False
+
+
+def test_finalize_writes_slim_npy_by_default(tmp_path):
+    seg = _make_segmenter({"exports": {}})  # full-dump off -> slim
+    m = np.zeros((10, 10), bool); m[1:5, 1:5] = True
+    d = {0: {"img": [np.zeros((10, 10, 3), np.uint8)], "mask": [m],
+             "img_bbx": [np.zeros((3, 3, 3), np.uint8)], "features": [1],
+             "frame": [0], "bbox": [np.zeros(4)]}}
+    out = tmp_path / "cam"; out.mkdir()
+    seg._finalize_mask_cache(d, str(out))
+    assert "img" not in d[0] and "mask" not in d[0] and "centroid_xy" in d[0]
+    rec = np.load(str(out / "masks.npy"), allow_pickle=True)[()]
+    assert "img" not in rec[0] and "mask" not in rec[0]
+    for fld in ("centroid_xy", "img_bbx", "features", "frame", "bbox"):
+        assert fld in rec[0]
+
+
+def test_finalize_full_dump_keeps_heavy(tmp_path):
+    seg = _make_segmenter({"exports": {"debug_full_masks_npy": True}})
+    d = {0: {"img": [np.zeros((4, 4, 3), np.uint8)], "mask": [np.zeros((4, 4), bool)],
+             "frame": [0]}}
+    out = tmp_path / "c"; out.mkdir()
+    seg._finalize_mask_cache(d, str(out))
+    assert "img" in d[0] and "mask" in d[0]        # heavy kept
+    assert "centroid_xy" in d[0]                    # centroid still computed
 
 
 def test_save_images_writes_expected_mask_pngs(tmp_path):

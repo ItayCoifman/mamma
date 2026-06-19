@@ -1056,10 +1056,18 @@ class SegmentMultipleFrames:
 
     def _reference_point_from_mask_data(self, obj_data, frame_idx):
         frames = np.asarray(obj_data.get("frame", []), dtype=np.int32)
-        masks = obj_data.get("mask", [])
-        if frames.size == 0 or len(masks) == 0:
+        if frames.size == 0:
             return None
         nearest = int(np.argmin(np.abs(frames - int(frame_idx))))
+        # Prefer the precomputed centroid (slim cache); fall back to the full
+        # mask for legacy / full-dump caches. Identical value either way.
+        cents = obj_data.get("centroid_xy")
+        if cents is not None and nearest < len(cents) and cents[nearest] is not None:
+            x, y = cents[nearest]
+            return np.array([float(x), float(y), 1.0], dtype=np.float64)
+        masks = obj_data.get("mask", [])
+        if len(masks) == 0:
+            return None
         mask = np.asarray(masks[nearest])
         return self._mask_centroid_xy1(mask)
 
@@ -1731,7 +1739,7 @@ class SegmentMultipleFrames:
             self.compute_clip_features(masks)
             if len(self.subject_feature_bank) == 0:
                 self.initialize_subject_feature_bank(masks, expected_subjects=expected_subjects)
-            self._drop_full_frames(masks)
+            self._finalize_mask_cache(masks, out_path)
 
         # Process new video
         else:
@@ -1770,7 +1778,7 @@ class SegmentMultipleFrames:
                     self.plot_tsne(new_mask_data, out_path)
                 except Exception as exc:
                     self._log_warn(f"Skipping t-SNE visualization due to runtime error: {exc}")
-            self._drop_full_frames(new_mask_data)
+            self._finalize_mask_cache(new_mask_data, out_path)
 
         # But still return the mask data from the first view
         # Alternatively, we could return the new_mask_data to be used in the next view
@@ -4197,6 +4205,10 @@ class SegmentMultipleFrames:
 
     def compute_clip_features(self, mask_data):
         for mask_id, data in mask_data.items():
+            # Skip if features were already loaded (slim masks.npy resume).
+            existing = data.get("features")
+            if existing is not None and hasattr(existing, "shape") and len(existing) > 0:
+                continue
             # get the bounding boxes
             crops = data.get("img_bbx", [])
             features = self._encode_clip_batch(crops)
@@ -4285,19 +4297,65 @@ class SegmentMultipleFrames:
         """
         return bool(self.assignment_config.get("exports", {}).get("debug_crop_summary", False))
 
-    def _drop_full_frames(self, mask_data):
-        """Free the full-resolution sampled frames from an in-memory mask dict.
+    def _debug_full_masks_npy(self):
+        """Whether masks.npy should keep the full-res frames + masks.
 
-        Once save_picked_masks() has cropped them into ``img_bbx`` and CLIP
-        features are computed, the full ``img`` frames are never read again — yet
-        the dict is held resident for the whole multi-camera run (the init
-        camera's masks are passed to every subsequent camera). Dropping them
-        frees the sampled-frame memory (~2 GB at 4K). ``masks.npy`` on disk is
-        untouched, so resume still rebuilds ``img_bbx``. (issue #14 follow-up)
+        Off by default: masks.npy is slimmed to what matching/resume need
+        (centroids + crops + features), ~100x smaller. The full-res masks remain
+        available as the per-frame mask PNGs. Enable with
+        ``exports.debug_full_masks_npy`` / ``--debug_full_masks_npy``.
+        """
+        return bool(self.assignment_config.get("exports", {}).get("debug_full_masks_npy", False))
+
+    def _compute_centroids(self, mask_data):
+        """Precompute each person's per-sampled-frame mask centroid (xy).
+
+        The cross-camera epipolar score only needs the centroid of each sampled
+        mask, not the full-res mask. Storing the centroid lets us drop the heavy
+        masks from the in-memory dict and from masks.npy while keeping matching
+        byte-identical. Aligned index-for-index with ``frame``. (issue #14)
+        """
+        for data in mask_data.values():
+            if not isinstance(data, dict) or "centroid_xy" in data:
+                continue
+            cents = []
+            for m in data.get("mask", []):
+                arr = np.asarray(m)
+                arr = arr[0] if arr.ndim == 3 else arr
+                c = self._mask_centroid_xy1(arr)
+                cents.append(None if c is None else [float(c[0]), float(c[1])])
+            data["centroid_xy"] = cents
+
+    def _slim_mask_record(self, mask_data):
+        """Drop the full-res frames + masks from an in-memory mask dict.
+
+        After img_bbx + features + centroids are computed, the full ``img`` and
+        ``mask`` arrays are never read again — yet the init camera's dict is held
+        resident for the whole multi-camera run and is the bulk of masks.npy.
+        Drop them; matching keeps using img_bbx / features / centroid_xy. The
+        full-res masks remain on disk as the per-frame mask PNGs.
         """
         for data in mask_data.values():
             if isinstance(data, dict):
                 data.pop("img", None)
+                data.pop("mask", None)
+
+    def _finalize_mask_cache(self, mask_data, out_path):
+        """Precompute centroids and (unless full-dump) slim the dict + re-save.
+
+        masks.npy was written full by the inner segmentation method (a crash-safe
+        completion marker); here we replace it with the slim record once the
+        matching essentials exist. With ``debug_full_masks_npy`` we keep the full
+        cache instead. (issue #14)
+        """
+        self._compute_centroids(mask_data)
+        if self._debug_full_masks_npy():
+            return  # keep the full masks.npy written by the inner method
+        self._slim_mask_record(mask_data)
+        try:
+            np.save(os.path.join(out_path, "masks.npy"), mask_data)
+        except Exception as exc:  # noqa: BLE001
+            self._log_warn(f"Failed to re-save slim mask cache at '{out_path}': {exc}")
 
     def save_picked_masks(self, mask_data, output_folder, render_viz=True):
         if render_viz:
@@ -4378,6 +4436,12 @@ class SegmentMultipleFrames:
         # (exports.debug_crop_summary); the img_bbx output is identical either
         # way, so cross-camera matching is unaffected by the flag. (issue #14 follow-up)
         for obj_id, data in mask_data.items():
+            # Slim cache (resume): full frames were dropped but img_bbx is already
+            # present — nothing to rebuild or render for this person.
+            if "img" not in data:
+                data.setdefault("img_bbx", [])
+                data.setdefault("img_bbx_frame", [])
+                continue
             imgs = data["img"]
             masks = data["mask"]
             frames = data["frame"]

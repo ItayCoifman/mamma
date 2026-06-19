@@ -193,11 +193,17 @@ sam:
 # and clean up the source images to save disk space.
 
 exports:
-  # Render per-person crop-summary + t-SNE debug PNGs. Off by default — these are
-  # pure matplotlib debugging aids and cost wall time. The mask PNGs, masks.npy
-  # cache, and the img_bbx crops that drive cross-camera matching are produced
-  # regardless of this flag. Also settable via --debug_crop_summary. (issue #14)
+  # Render per-person crop-summary + t-SNE + cross-camera debug PNGs. Off by
+  # default — these are pure matplotlib debugging aids and cost wall time. The
+  # mask PNGs, masks.npy cache, and the img_bbx crops that drive cross-camera
+  # matching are produced regardless. Also settable via --debug_crop_summary. (issue #14)
   debug_crop_summary: false
+
+  # Keep full-res frames + masks in masks.npy (~100x larger). Off by default:
+  # masks.npy is slimmed to what matching/resume actually need (per-person
+  # centroids + crops + CLIP features); the full-res masks remain on disk as the
+  # per-frame mask PNGs. Also settable via --debug_full_masks_npy. (issue #14)
+  debug_full_masks_npy: false
 
   # Convert mask overlay images to MP4 video.
   export_masked_outputs_mp4: true

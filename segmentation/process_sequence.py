@@ -490,9 +490,15 @@ def process_seq(
             pipeline.save_subject_feature_bank(feature_bank_cache)
         _log("INFO", f"[{idx}/{n_cameras}] Done: {cam_label}")
 
-    # --- Cross-camera consistency check ---
-    from utils.visualization import generate_cross_camera_summary
-    generate_cross_camera_summary(seq_out_path, log_fn=_log)
+    # --- Cross-camera consistency check (debug viz) ---
+    # Stacks the per-person crop-summary PNGs across cameras; those PNGs are only
+    # produced when debug_crop_summary is on, so gate this on the same flag to
+    # avoid empty work by default. (issue #14)
+    _debug_viz = bool(isinstance(assignment_config, dict)
+                      and assignment_config.get("exports", {}).get("debug_crop_summary", False))
+    if _debug_viz:
+        from utils.visualization import generate_cross_camera_summary
+        generate_cross_camera_summary(seq_out_path, log_fn=_log)
 
     # --- Collage video ---
     if not skip_collage:
