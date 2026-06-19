@@ -536,7 +536,15 @@ class _Sam3PromptVideoAdapter:
         )
         return self._parse_outputs(response.get("outputs"))
 
-    def propagate(self, sink=None):
+    def _cached_frame_outputs(self):
+        """Return the session's cached_frame_outputs dict, or None."""
+        try:
+            sess = self._predictor._get_session(self._session_id)
+            return sess["state"].get("cached_frame_outputs") if sess else None
+        except Exception:
+            return None
+
+    def propagate(self, sink=None, prune_cache_window=None, keep_frames=()):
         """Propagate all prompts bidirectionally.
 
         If ``sink`` is provided it is called as ``sink(frame_idx, {obj_id: mask})``
@@ -544,9 +552,23 @@ class _Sam3PromptVideoAdapter:
         pipeline to stream masks straight to a disk-backed store (issue #14).
         Otherwise the full ``{frame_idx: {obj_id: mask}}`` dict is returned
         (back-compatible).
+
+        prune_cache_window (opt-in, default None = off): SAM3's session stores
+        every frame's outputs in ``inference_state["cached_frame_outputs"]`` and
+        never prunes them during propagation, so VRAM grows ~5x faster than the
+        sam3 tracker path and OOMs on long clips. When set to an int W, entries
+        whose frame index is farther than W from the frame just emitted are
+        dropped (keep_frames — e.g. the prompt frame — are always retained), so
+        peak cache is bounded to ~2W frames. We already stream each frame's masks
+        out via ``sink`` and never re-query, so this is dead weight here — but the
+        prune is gated and parity-checked because the bidirectional pass can
+        re-read cached frames. (issue #14)
         """
         import numpy as np
         video_segments = {} if sink is None else None
+        keep = {int(f) for f in (keep_frames or ())}
+        cfo = self._cached_frame_outputs() if prune_cache_window is not None else None
+        W = int(prune_cache_window) if prune_cache_window is not None else None
         # As used in https://github.com/facebookresearch/sam3/blob/main/examples/sam3_video_predictor_example.ipynb
         for response in self._predictor.handle_stream_request(
             request=dict(
@@ -567,6 +589,12 @@ class _Sam3PromptVideoAdapter:
                 sink(frame_idx, masks)
             else:
                 video_segments[frame_idx] = masks
+            # Bound the session output cache (issue #14): drop entries outside the
+            # sliding window around the just-emitted frame; never drop keep_frames.
+            if cfo is not None:
+                lo, hi = frame_idx - W, frame_idx + W
+                for fi in [k for k in cfo if k not in keep and (k < lo or k > hi)]:
+                    cfo.pop(fi, None)
         return None if sink is not None else dict(sorted(video_segments.items()))
 
     def reset_session(self):

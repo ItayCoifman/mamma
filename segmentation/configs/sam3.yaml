@@ -131,6 +131,17 @@ sam:
   offload_state_min_frames: 1500    # frame count above which "auto" enables offload_state_to_cpu
   fp16_frames: false                # store decoded frames as float16 (halves frame RAM/VRAM). Opt-in: alters overlay pixels by ≤1 LSB
 
+  # sam3_prompt ONLY: bound SAM3's session output cache (cached_frame_outputs).
+  # That cache stores every frame's masks and is never pruned during propagation,
+  # so sam3_prompt VRAM grows ~5x faster than the sam3 tracker path and OOMs on
+  # long clips (measured: OOM at ~700 frames on a 24 GB GPU). Setting an int W
+  # keeps only frames within ±W of the one being emitted (the prompt frame is
+  # always kept), bounding peak cache to ~2W frames. We stream every frame's
+  # masks out and never re-query, so this is dead weight — validated byte-identical
+  # (2361/2361 masks @400f) and it fixes the 700-frame OOM (21.1 → 15.2 GB @400f,
+  # ~+7% wall). null = off (default). Recommended for long sam3_prompt clips: 32-64.
+  sam3_prune_cache_window: null
+
 # ─── SAM3 tracking overrides (sam3_prompt mode) ─────────────────────────────
 # Override SAM3's internal tracking config at runtime. These are applied
 # directly to the model after construction (predictor.model.<field>).

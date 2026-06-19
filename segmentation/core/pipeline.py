@@ -2505,9 +2505,19 @@ class SegmentMultipleFrames:
 
         # Propagate — stream each frame's masks straight into the disk-backed
         # store instead of returning one big in-RAM dict (issue #14).
-        self._log_info(f"[{cam_name}] Propagating SAM3 text prompt through video.")
+        # Optionally bound SAM3's per-frame output cache (cached_frame_outputs),
+        # which otherwise grows ~5x faster than the sam3 tracker path and OOMs on
+        # long clips. Opt-in via sam3.yaml: sam.sam3_prune_cache_window (frames).
+        sam_cfg = self.assignment_config.get("sam") or {}
+        prune_w = sam_cfg.get("sam3_prune_cache_window", None)
+        prune_w = int(prune_w) if prune_w not in (None, "", 0) else None
+        self._log_info(
+            f"[{cam_name}] Propagating SAM3 text prompt through video"
+            + (f" (cache prune window={prune_w}, keep prompt frame {best_frame})." if prune_w else ".")
+        )
         video_segments = MaskStore()
-        predictor.propagate(sink=video_segments.set_frame)
+        predictor.propagate(sink=video_segments.set_frame,
+                            prune_cache_window=prune_w, keep_frames=(best_frame,))
         self._log_info(f"[{cam_name}] Propagation complete. {len(video_segments)} frame segments.")
         predictor.close_session()
 
