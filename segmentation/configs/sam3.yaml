@@ -138,9 +138,12 @@ sam:
   # keeps only frames within ±W of the one being emitted (the prompt frame is
   # always kept), bounding peak cache to ~2W frames. We stream every frame's
   # masks out and never re-query, so this is dead weight — validated byte-identical
-  # (2361/2361 masks @400f) and it fixes the 700-frame OOM (21.1 → 15.2 GB @400f,
-  # ~+7% wall). null = off (default). Recommended for long sam3_prompt clips: 32-64.
-  sam3_prune_cache_window: null
+  # across 3-person, 6-person and 2-camera runs (890/890, 2351/2351 masks). At W=32
+  # it cuts VRAM ~18% and raises the frame ceiling (700f completes at 18.3 GB where
+  # no-prune OOMs), at ~+7% wall. Default ON at 32. Note: the full 743-frame
+  # 6-person clip still needs >24 GB even pruned (intrinsic SAM3 cost) — window very
+  # long clips with --start/--end, or use a bigger GPU. Set to null to disable.
+  sam3_prune_cache_window: 32
 
 # ─── SAM3 tracking overrides (sam3_prompt mode) ─────────────────────────────
 # Override SAM3's internal tracking config at runtime. These are applied
