@@ -348,13 +348,51 @@ class _Sam3VideoAdapter:
     - Propagate: SAM3 yields 5-tuple, SAM2 yields 3-tuple
     """
 
-    def __init__(self, sam3_model):
+    def __init__(self, sam3_model, keep_detector=False):
         # Per official sam3_for_sam2_video_task_example.ipynb:
         # use the tracker directly, share backbone from detector
         self._tracker = sam3_model.tracker
         self._tracker.backbone = sam3_model.detector.backbone
         self._video_width = None
         self._video_height = None
+        # sam3_prompt_lean: keep the detector so we can run open-vocabulary text
+        # detection ("person") on init/anchor frames in place of YOLO, using the
+        # *same* model the tracker already loaded — a lean alternative to the 16x
+        # multiplex session predictor (which costs ~2x the VRAM). (issue #14)
+        self._detector = sam3_model.detector if keep_detector else None
+        self._text_proc = None
+
+    def text_detect(self, image_rgb, text="person", conf_thresh=0.5):
+        """Open-vocabulary detection on one RGB frame via SAM3's detector.
+
+        Returns a list of (bbox_xyxy float32, score) for instances scoring above
+        conf_thresh. Mirrors what YOLO provides so the rest of the pipeline
+        (anchors, tracking, cross-camera matching) is reused unchanged.
+        """
+        if self._detector is None:
+            raise RuntimeError("text_detect requires the adapter built with keep_detector=True")
+        if self._text_proc is None:
+            from sam3.model.sam3_image_processor import Sam3Processor
+            self._text_proc = Sam3Processor(self._detector)
+        import numpy as np
+        from PIL import Image
+        # Pass a PIL image: Sam3Processor.set_image reads dims as image.shape[-2:]
+        # for arrays, which mis-reads (H,W,3) numpy as width=3 → collapsed x-scale.
+        # PIL.size is read correctly, so boxes come back in true pixel coords.
+        pil = Image.fromarray(np.ascontiguousarray(image_rgb)) if not isinstance(image_rgb, Image.Image) else image_rgb
+        st = self._text_proc.set_image(pil)
+        st = self._text_proc.set_text_prompt(text, st)
+        boxes, scores = st.get("boxes"), st.get("scores")
+        out = []
+        if boxes is None or scores is None:
+            return out
+        for b, s in zip(boxes, scores):
+            sc = float(s)
+            if sc < conf_thresh:
+                continue
+            bb = b.detach().cpu().numpy() if hasattr(b, "detach") else np.asarray(b)
+            out.append((bb.astype(np.float32).reshape(-1)[:4], sc))
+        return out
 
     def init_state(self, video_path, **kwargs):
         state = self._tracker.init_state(video_path=video_path, **kwargs)
@@ -692,15 +730,20 @@ def build_video_predictor(sam_version: str, config: str | None, checkpoint: str 
         from sam2.build_sam import build_sam2_video_predictor  # type: ignore
         return build_sam2_video_predictor(config, checkpoint, device=device)
 
-    elif sam_version == "sam3":
+    elif sam_version in ("sam3", "sam3_prompt_lean"):
+        # Both use the lean SAM3 tracker (build_sam3_video_model). sam3 detects
+        # with YOLO; sam3_prompt_lean text-detects "person" via the model's own
+        # detector (keep_detector=True) — no YOLO, no 16x multiplex predictor.
         _patch_sam3_png_support()
         from sam3.model_builder import build_sam3_video_model  # type: ignore
         sam3_model = build_sam3_video_model()
-        return _Sam3VideoAdapter(sam3_model)
+        return _Sam3VideoAdapter(sam3_model, keep_detector=(sam_version == "sam3_prompt_lean"))
 
     elif sam_version == "sam3_prompt":
         _patch_sam3_png_support()
         return _Sam3PromptVideoAdapter(checkpoint_path=checkpoint, tracking_overrides=tracking_overrides)
 
     else:
-        raise ValueError(f"Unknown sam_version: {sam_version!r}. Expected 'sam2', 'sam3', or 'sam3_prompt'.")
+        raise ValueError(
+            f"Unknown sam_version: {sam_version!r}. Expected 'sam2', 'sam3', "
+            "'sam3_prompt', or 'sam3_prompt_lean'.")

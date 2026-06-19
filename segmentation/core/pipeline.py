@@ -201,7 +201,7 @@ class SegmentMultipleFrames:
         self.clip_model.eval()  # model in train mode by default, impacts some models with BatchNorm or stochastic depth active
         self.clip_model.to(self.device)
 
-        if sam_version in ("sam3", "sam3_prompt"):
+        if sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean"):
             self.img_mean_sam = torch.tensor((0.5, 0.5, 0.5)).view(1, 3, 1, 1)
             self.img_std_sam = torch.tensor((0.5, 0.5, 0.5)).view(1, 3, 1, 1)
         else:
@@ -210,7 +210,7 @@ class SegmentMultipleFrames:
 
     @property
     def _is_sam3(self):
-        return self.sam_version in ("sam3", "sam3_prompt")
+        return self.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean")
 
     @property
     def _frame_offset(self):
@@ -1260,6 +1260,11 @@ class SegmentMultipleFrames:
             _, detections = self._collect_yolo_detections(
                 frame_img, yolo_conf, include_clip_features=True
             )
+            # A candidate frame with no detections can't anchor anything; skip it
+            # (avoids torch.stack on an empty list — hit more often with SAM3
+            # text detection than YOLO, but a latent crash for both).
+            if len(detections) == 0:
+                continue
             if len(detections) < n_total:
                 # Not enough detections to cover all people — skip unless
                 # it's better than what we have
@@ -4503,6 +4508,42 @@ class SegmentMultipleFrames:
                     f"Object {obj_id}: skipped {skipped} invalid/empty bbox crops while generating summaries."
                 )
 
+    def _collect_sam3_text_detections(self, img, conf_thresh, include_clip_features=True):
+        """SAM3 open-vocabulary 'person' detection — the sam3_prompt_lean drop-in
+        for YOLO. Returns (PIL image, [(crop, feature, bbox_xyxy, score)]), the
+        same contract as _collect_yolo_detections, so anchors/matching/tracking
+        are reused unchanged. (issue #14 follow-up)
+        """
+        cfg = self._get_matching_cfg()
+        np_img = np.asarray(img.convert("RGB"))
+        h, w = np_img.shape[:2]
+        dets = self.predictor.text_detect(np_img, text="person", conf_thresh=conf_thresh)
+        crops, boxes_xyxy, scores = [], [], []
+        for bbx, sc in dets:
+            x1, y1, x2, y2 = (int(np.clip(bbx[0], 0, w - 1)), int(np.clip(bbx[1], 0, h - 1)),
+                              int(np.clip(bbx[2], 0, w)), int(np.clip(bbx[3], 0, h)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            crop = np_img[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            crops.append(crop)
+            boxes_xyxy.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+            scores.append(float(sc))
+        if len(crops) > 1 and bool(cfg.get("yolo_dedup_enable", True)):
+            raw = [(c, None, b, s) for c, b, s in zip(crops, boxes_xyxy, scores)]
+            deduped = self._deduplicate_detections(raw, iou_threshold=float(cfg.get("yolo_dedup_iou", 0.75)))
+            crops = [d[0] for d in deduped]
+            boxes_xyxy = [d[2] for d in deduped]
+            scores = [float(d[3]) for d in deduped]
+        detections = []
+        if len(crops) > 0 and include_clip_features:
+            feats = self._encode_clip_batch(crops)
+            detections = [(c, f, b, s) for c, f, b, s in zip(crops, feats, boxes_xyxy, scores)]
+        elif len(crops) > 0:
+            detections = [(c, None, b, s) for c, b, s in zip(crops, boxes_xyxy, scores)]
+        return img, detections
+
     def _collect_yolo_detections(self, img_or_path, conf_thresh: float, include_clip_features: bool = True):
         """Run YOLO person detection on a frame.
 
@@ -4522,6 +4563,11 @@ class SegmentMultipleFrames:
         else:
             with Image.open(img_or_path) as pil_img:
                 img = pil_img.copy()
+        # sam3_prompt_lean: detect people with SAM3's own open-vocabulary text
+        # detector ("person") instead of YOLO — same (img, [(crop,feat,bbox,score)])
+        # contract, so all downstream anchor/matching/tracking code is unchanged.
+        if self.sam_version == "sam3_prompt_lean":
+            return self._collect_sam3_text_detections(img, conf_thresh, include_clip_features)
         out = self.yolo_model(img, verbose=False)
         detections = []
         np_img = np.asarray(img)

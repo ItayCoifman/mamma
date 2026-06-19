@@ -92,9 +92,12 @@ SAM backends:
                              '(from --calibration) before SAM / YOLO. Default off.')
 
     # --- SAM backend ---
-    parser.add_argument('--sam_version', default='sam2', choices=['sam2', 'sam3', 'sam3_prompt'],
-                        help='SAM backend: sam2 (default), sam3 (tracker API), '
-                             'or sam3_prompt (text prompt "person" — no YOLO needed for init camera)')
+    parser.add_argument('--sam_version', default='sam2',
+                        choices=['sam2', 'sam3', 'sam3_prompt', 'sam3_prompt_lean'],
+                        help='SAM backend: sam2 (default), sam3 (tracker API + YOLO), '
+                             'sam3_prompt (text prompt "person" via the multiplex session '
+                             'predictor — heaviest VRAM), or sam3_prompt_lean (text prompt '
+                             '"person" via SAM3 detector + lean tracker — no YOLO, ~half the VRAM)')
     parser.add_argument('--sam_checkpoint', default=None,
                         help='Override SAM checkpoint path or HuggingFace model ID')
     parser.add_argument('--yolo-checkpoint', '--yolo_checkpoint',
@@ -153,7 +156,7 @@ SAM backends:
 
     # Auto-select config based on sam_version if not specified
     if args.cfg is None:
-        if args.sam_version in ("sam3", "sam3_prompt"):
+        if args.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean"):
             args.cfg = "configs/sam3.yaml"
         else:
             args.cfg = "configs/sam2.yaml"
