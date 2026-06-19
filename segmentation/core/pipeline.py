@@ -1727,10 +1727,11 @@ class SegmentMultipleFrames:
             if masks is None:
                 self._log_warn(f"[{cam_name}] Initialization skipped: no valid person detections found.")
                 return None
-            self.save_picked_masks(masks, out_path)
+            self.save_picked_masks(masks, out_path, render_viz=self._debug_crop_summary())
             self.compute_clip_features(masks)
             if len(self.subject_feature_bank) == 0:
                 self.initialize_subject_feature_bank(masks, expected_subjects=expected_subjects)
+            self._drop_full_frames(masks)
 
         # Process new video
         else:
@@ -1762,12 +1763,14 @@ class SegmentMultipleFrames:
                     target_cam_data=cam_data,
                     expected_subjects=expected_subjects,
                 )
-            self.save_picked_masks(new_mask_data, out_path)
+            self.save_picked_masks(new_mask_data, out_path, render_viz=self._debug_crop_summary())
             self.compute_clip_features(new_mask_data)
-            try:
-                self.plot_tsne(new_mask_data, out_path)
-            except Exception as exc:
-                self._log_warn(f"Skipping t-SNE visualization due to runtime error: {exc}")
+            if self._debug_crop_summary():
+                try:
+                    self.plot_tsne(new_mask_data, out_path)
+                except Exception as exc:
+                    self._log_warn(f"Skipping t-SNE visualization due to runtime error: {exc}")
+            self._drop_full_frames(new_mask_data)
 
         # But still return the mask data from the first view
         # Alternatively, we could return the new_mask_data to be used in the next view
@@ -4272,10 +4275,36 @@ class SegmentMultipleFrames:
             plt.close()
 
 
-    def save_picked_masks(self, mask_data, output_folder):
-        self._log_info(f"Generating per-ID mask crop summaries in '{output_folder}'.")
+    def _debug_crop_summary(self):
+        """Whether to render the per-person crop-summary / t-SNE debug PNGs.
+
+        Off by default (issue #14 follow-up): these matplotlib renders are pure
+        debugging aids and cost wall time; the underlying img_bbx crops that feed
+        cross-camera matching are always built regardless. Enable with
+        ``exports.debug_crop_summary: true`` (or ``--debug_crop_summary``).
+        """
+        return bool(self.assignment_config.get("exports", {}).get("debug_crop_summary", False))
+
+    def _drop_full_frames(self, mask_data):
+        """Free the full-resolution sampled frames from an in-memory mask dict.
+
+        Once save_picked_masks() has cropped them into ``img_bbx`` and CLIP
+        features are computed, the full ``img`` frames are never read again — yet
+        the dict is held resident for the whole multi-camera run (the init
+        camera's masks are passed to every subsequent camera). Dropping them
+        frees the sampled-frame memory (~2 GB at 4K). ``masks.npy`` on disk is
+        untouched, so resume still rebuilds ``img_bbx``. (issue #14 follow-up)
+        """
+        for data in mask_data.values():
+            if isinstance(data, dict):
+                data.pop("img", None)
+
+    def save_picked_masks(self, mask_data, output_folder, render_viz=True):
+        if render_viz:
+            self._log_info(f"Generating per-ID mask crop summaries in '{output_folder}'.")
         if len(mask_data) == 0:
-            self._log_warn("No mask data available to summarize.")
+            if render_viz:
+                self._log_warn("No mask data available to summarize.")
             return
 
         first_key = sorted(mask_data.keys())[0]
@@ -4343,7 +4372,11 @@ class SegmentMultipleFrames:
                     return None
             return x1, y1, x2, y2
 
-        # plot data
+        # Build per-person crops (img_bbx) — ALWAYS, because img_bbx feeds the
+        # cross-camera CLIP gallery (matching). The matplotlib crop-summary PNG
+        # is pure debugging viz and is only rendered when render_viz is set
+        # (exports.debug_crop_summary); the img_bbx output is identical either
+        # way, so cross-camera matching is unaffected by the flag. (issue #14 follow-up)
         for obj_id, data in mask_data.items():
             imgs = data["img"]
             masks = data["mask"]
@@ -4351,42 +4384,46 @@ class SegmentMultipleFrames:
             bboxs = data["bbox"]
             data["img_bbx"] = []
             data["img_bbx_frame"] = []
-            cols = 3  # Number of columns in the grid
-            rows = max(1, (len(frames) + cols - 1) // cols)  # Calculate the number of rows needed
-            fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
-            axes = axes.flatten()
+            axes = None
+            if render_viz:
+                cols = 3
+                rows = max(1, (len(frames) + cols - 1) // cols)
+                fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
+                axes = axes.flatten()
             skipped = 0
             for idx, (img, mask, frame_idx, bbx) in enumerate(zip(imgs, masks, frames, bboxs)):
-                ax = axes[idx]
+                ax = axes[idx] if render_viz else None
                 coords = _sanitize_bbox(bbx, img.shape, mask_arr=mask)
                 if coords is None:
                     skipped += 1
-                    ax.text(0.5, 0.5, "Invalid/empty bbox", ha="center", va="center")
-                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                    ax.axis("off")
+                    if render_viz:
+                        ax.text(0.5, 0.5, "Invalid/empty bbox", ha="center", va="center")
+                        ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                        ax.axis("off")
                     continue
                 x1, y1, x2, y2 = coords
                 img_bbx = img[y1:y2, x1:x2]
                 if img_bbx.size == 0:
                     skipped += 1
-                    ax.text(0.5, 0.5, "Empty crop", ha="center", va="center")
-                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                    ax.axis("off")
+                    if render_viz:
+                        ax.text(0.5, 0.5, "Empty crop", ha="center", va="center")
+                        ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                        ax.axis("off")
                     continue
 
                 data["img_bbx"].append(img_bbx)
                 data["img_bbx_frame"].append(int(frame_idx))
-                ax.imshow(img_bbx)
-                ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                ax.axis("off")
+                if render_viz:
+                    ax.imshow(img_bbx)
+                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                    ax.axis("off")
 
-            # Hide any unused subplots
-            for ax in axes[len(frames):]:
-                ax.axis("off")
-
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_folder, f"person_{obj_id:02d}_crop_summary.png"))
-            plt.close()
+            if render_viz:
+                for ax in axes[len(frames):]:
+                    ax.axis("off")
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_folder, f"person_{obj_id:02d}_crop_summary.png"))
+                plt.close()
             if skipped > 0:
                 self._log_warn(
                     f"Object {obj_id}: skipped {skipped} invalid/empty bbox crops while generating summaries."

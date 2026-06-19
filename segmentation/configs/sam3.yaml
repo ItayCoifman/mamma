@@ -167,6 +167,11 @@ sam3_tracking:
 # ─── Export ───────────────────────────────────────────────────────────────────
 
 exports:
+  # Render per-person crop-summary + t-SNE debug PNGs (pure viz; off by default,
+  # costs wall time). Mask PNGs / masks.npy / matching crops are produced either
+  # way. Also settable via --debug_crop_summary. (issue #14)
+  debug_crop_summary: false
+
   export_masked_outputs_mp4: true
   masked_outputs_fps: 30.0
   remove_masked_outputs_images: true

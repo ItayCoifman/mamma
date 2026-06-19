@@ -13,6 +13,8 @@ attributes the methods touch). They lock the externally-observable contract:
 import os
 
 import cv2
+import matplotlib
+matplotlib.use("Agg")  # headless render for the crop-summary test
 import numpy as np
 import torch
 
@@ -30,6 +32,48 @@ def _make_segmenter(assignment_config):
     seg._log_warn = lambda *a, **k: None
     seg._log_error = lambda *a, **k: None
     return seg
+
+
+def _crop_mask_data(h=20, w=30):
+    img = np.random.default_rng(0).integers(0, 255, size=(h, w, 3), dtype=np.uint8)
+    mask = np.zeros((h, w), bool); mask[5:15, 8:20] = True
+    bbox = np.array([8, 5, 20, 15], dtype=np.float32)
+    return {0: {"img": [img], "mask": [mask], "frame": [3], "bbox": [bbox], "iou": [1.0]}}
+
+
+def test_crop_summary_builds_img_bbx_regardless_of_viz(tmp_path):
+    """img_bbx (feeds cross-camera matching) is built whether or not the debug
+    viz PNG is rendered — and is byte-identical between the two modes."""
+    seg = _make_segmenter({"exports": {}})
+
+    d_off = _crop_mask_data(); out_off = tmp_path / "off"; out_off.mkdir()
+    seg.save_picked_masks(d_off, str(out_off), render_viz=False)
+    assert len(d_off[0]["img_bbx"]) == 1
+    assert list(out_off.glob("*.png")) == []          # no viz written
+
+    d_on = _crop_mask_data(); out_on = tmp_path / "on"; out_on.mkdir()
+    seg.save_picked_masks(d_on, str(out_on), render_viz=True)
+    assert len(d_on[0]["img_bbx"]) == 1
+    assert (out_on / "person_00_crop_summary.png").exists()   # viz written
+
+    assert np.array_equal(d_off[0]["img_bbx"][0], d_on[0]["img_bbx"][0])  # matching input identical
+
+
+def test_drop_full_frames_keeps_matching_fields():
+    seg = _make_segmenter({})
+    d = {0: {"img": [np.zeros((4, 4, 3), np.uint8)],
+             "img_bbx": [np.zeros((2, 2, 3), np.uint8)],
+             "mask": [np.zeros((4, 4), bool)], "frame": [0], "bbox": [np.zeros(4)]}}
+    seg._drop_full_frames(d)
+    assert "img" not in d[0]                                   # full frames freed
+    for fld in ("img_bbx", "mask", "frame", "bbox"):          # matching fields retained
+        assert fld in d[0]
+
+
+def test_debug_crop_summary_flag():
+    assert _make_segmenter({"exports": {"debug_crop_summary": True}})._debug_crop_summary() is True
+    assert _make_segmenter({"exports": {}})._debug_crop_summary() is False
+    assert _make_segmenter({})._debug_crop_summary() is False
 
 
 def test_save_images_writes_expected_mask_pngs(tmp_path):
