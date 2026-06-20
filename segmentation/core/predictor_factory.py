@@ -355,7 +355,7 @@ class _Sam3VideoAdapter:
         self._tracker.backbone = sam3_model.detector.backbone
         self._video_width = None
         self._video_height = None
-        # sam3_prompt_lean: keep the detector so we can run open-vocabulary text
+        # sam3_prompt_light: keep the detector so we can run open-vocabulary text
         # detection ("person") on init/anchor frames in place of YOLO, using the
         # *same* model the tracker already loaded — a lean alternative to the 16x
         # multiplex session predictor (which costs ~2x the VRAM). (issue #14)
@@ -730,14 +730,14 @@ def build_video_predictor(sam_version: str, config: str | None, checkpoint: str 
         from sam2.build_sam import build_sam2_video_predictor  # type: ignore
         return build_sam2_video_predictor(config, checkpoint, device=device)
 
-    elif sam_version in ("sam3", "sam3_prompt_lean"):
+    elif sam_version in ("sam3", "sam3_prompt_light"):
         # Both use the lean SAM3 tracker (build_sam3_video_model). sam3 detects
-        # with YOLO; sam3_prompt_lean text-detects "person" via the model's own
+        # with YOLO; sam3_prompt_light text-detects "person" via the model's own
         # detector (keep_detector=True) — no YOLO, no 16x multiplex predictor.
         _patch_sam3_png_support()
         from sam3.model_builder import build_sam3_video_model  # type: ignore
         sam3_model = build_sam3_video_model()
-        return _Sam3VideoAdapter(sam3_model, keep_detector=(sam_version == "sam3_prompt_lean"))
+        return _Sam3VideoAdapter(sam3_model, keep_detector=(sam_version == "sam3_prompt_light"))
 
     elif sam_version == "sam3_prompt":
         _patch_sam3_png_support()
@@ -746,4 +746,4 @@ def build_video_predictor(sam_version: str, config: str | None, checkpoint: str 
     else:
         raise ValueError(
             f"Unknown sam_version: {sam_version!r}. Expected 'sam2', 'sam3', "
-            "'sam3_prompt', or 'sam3_prompt_lean'.")
+            "'sam3_prompt', or 'sam3_prompt_light'.")

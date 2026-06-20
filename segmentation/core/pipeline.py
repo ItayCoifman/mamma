@@ -187,21 +187,26 @@ class SegmentMultipleFrames:
             tracking_overrides=tracking_overrides,
         )
 
-        # Check if file exists
-        if not os.path.isfile(yolo_checkpoint):
-            raise FileNotFoundError(f"YOLO checkpoint file not found: {yolo_checkpoint}")
-
-        self.yolo_model = YOLO(yolo_checkpoint, verbose=False)
-        if platform.system() == "Windows":
-            self.yolo_model.to('cpu')
+        # sam3_prompt_light detects people with SAM3's own text detector, so YOLO
+        # is never used — skip loading it (saves ~0.2 GB + the checkpoint need).
+        if sam_version == "sam3_prompt_light":
+            self.yolo_model = None
+            if yolo_checkpoint:
+                self._log_info("sam3_prompt_light: YOLO not loaded (SAM3 text detection is used).")
         else:
-            self.yolo_model.to(self.device)
+            if not yolo_checkpoint or not os.path.isfile(yolo_checkpoint):
+                raise FileNotFoundError(f"YOLO checkpoint file not found: {yolo_checkpoint}")
+            self.yolo_model = YOLO(yolo_checkpoint, verbose=False)
+            if platform.system() == "Windows":
+                self.yolo_model.to('cpu')
+            else:
+                self.yolo_model.to(self.device)
 
         self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         self.clip_model.eval()  # model in train mode by default, impacts some models with BatchNorm or stochastic depth active
         self.clip_model.to(self.device)
 
-        if sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean"):
+        if sam_version in ("sam3", "sam3_prompt", "sam3_prompt_light"):
             self.img_mean_sam = torch.tensor((0.5, 0.5, 0.5)).view(1, 3, 1, 1)
             self.img_std_sam = torch.tensor((0.5, 0.5, 0.5)).view(1, 3, 1, 1)
         else:
@@ -210,7 +215,7 @@ class SegmentMultipleFrames:
 
     @property
     def _is_sam3(self):
-        return self.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean")
+        return self.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_light")
 
     @property
     def _frame_offset(self):
@@ -4509,7 +4514,7 @@ class SegmentMultipleFrames:
                 )
 
     def _collect_sam3_text_detections(self, img, conf_thresh, include_clip_features=True):
-        """SAM3 open-vocabulary 'person' detection — the sam3_prompt_lean drop-in
+        """SAM3 open-vocabulary 'person' detection — the sam3_prompt_light drop-in
         for YOLO. Returns (PIL image, [(crop, feature, bbox_xyxy, score)]), the
         same contract as _collect_yolo_detections, so anchors/matching/tracking
         are reused unchanged. (issue #14 follow-up)
@@ -4563,10 +4568,10 @@ class SegmentMultipleFrames:
         else:
             with Image.open(img_or_path) as pil_img:
                 img = pil_img.copy()
-        # sam3_prompt_lean: detect people with SAM3's own open-vocabulary text
+        # sam3_prompt_light: detect people with SAM3's own open-vocabulary text
         # detector ("person") instead of YOLO — same (img, [(crop,feat,bbox,score)])
         # contract, so all downstream anchor/matching/tracking code is unchanged.
-        if self.sam_version == "sam3_prompt_lean":
+        if self.sam_version == "sam3_prompt_light":
             return self._collect_sam3_text_detections(img, conf_thresh, include_clip_features)
         out = self.yolo_model(img, verbose=False)
         detections = []

@@ -93,19 +93,20 @@ SAM backends:
 
     # --- SAM backend ---
     parser.add_argument('--sam_version', default='sam2',
-                        choices=['sam2', 'sam3', 'sam3_prompt', 'sam3_prompt_lean'],
+                        choices=['sam2', 'sam3', 'sam3_prompt', 'sam3_prompt_light'],
                         help='SAM backend: sam2 (default), sam3 (tracker API + YOLO), '
                              'sam3_prompt (text prompt "person" via the multiplex session '
-                             'predictor — heaviest VRAM), or sam3_prompt_lean (text prompt '
+                             'predictor — heaviest VRAM), or sam3_prompt_light (text prompt '
                              '"person" via SAM3 detector + lean tracker — no YOLO, ~half the VRAM)')
     parser.add_argument('--sam_checkpoint', default=None,
                         help='Override SAM checkpoint path or HuggingFace model ID')
     parser.add_argument('--yolo-checkpoint', '--yolo_checkpoint',
-                        dest='yolo_checkpoint', required=True,
+                        dest='yolo_checkpoint', default=None,
                         help='Path to the YOLOv12-X person-detection weights '
-                             '(.pt file). The MAMMA inference runner injects '
-                             'this from MAMMA_YOLO_CHECKPOINT / .env.local; '
-                             'standalone callers must pass it explicitly.')
+                             '(.pt file). Required for all backends except '
+                             'sam3_prompt_light (which detects via SAM3 text). '
+                             'The MAMMA inference runner injects this from '
+                             'MAMMA_YOLO_CHECKPOINT / .env.local.')
 
     # --- Frame range ---
     parser.add_argument('--start', type=int, default=None,
@@ -154,9 +155,14 @@ SAM backends:
 
     args = parser.parse_args()
 
+    # YOLO is required for every backend except sam3_prompt_light (SAM3 text detect).
+    if args.sam_version != "sam3_prompt_light" and not args.yolo_checkpoint:
+        logger.error(f"--yolo_checkpoint is required for --sam_version {args.sam_version}.")
+        return
+
     # Auto-select config based on sam_version if not specified
     if args.cfg is None:
-        if args.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_lean"):
+        if args.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_light"):
             args.cfg = "configs/sam3.yaml"
         else:
             args.cfg = "configs/sam2.yaml"
