@@ -802,14 +802,18 @@ class SegmentMultipleFrames:
             crops = self.subject_crop_bank.get(oid, [])
             return gallery, crops
 
-        gal = mask_data[oid].get("features")
+        # Not in the feature bank: fall back to per-frame mask_data. Callers may
+        # pass {} (bank-only lookup), so a missing oid means "no gallery", not a
+        # crash — the caller treats None as "skip this id".
+        rec = mask_data.get(oid)
+        gal = rec.get("features") if rec is not None else None
         if gal is None:
             return None, []
         if isinstance(gal, list):
             gallery = torch.stack(gal) if len(gal) > 0 else None
         else:
             gallery = gal if len(gal) > 0 else None
-        crops = mask_data[oid].get("img_bbx", [])
+        crops = rec.get("img_bbx", [])
         return gallery, crops
 
     def initialize_subject_feature_bank(self, mask_data, expected_subjects=None):
