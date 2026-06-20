@@ -53,8 +53,8 @@ Installation is managed by the parent `mamma_release` repo. See [`docs/INSTALL.m
 - SAM 2: `data/weights/sam2/sam2.1_hiera_large.pt`
 - SAM 3: loaded lazily from the Hugging Face cache (no local file)
 
-SAM 3 weights come from a **gated** Hugging Face model, so `--sam_version sam3`
-and `--sam_version sam3_prompt` need an approved account and a local
+SAM 3 weights come from a **gated** Hugging Face model, so the SAM3 backends
+(`sam3`, `sam3_prompt`, `sam3_prompt_light`) need an approved account and a local
 `huggingface-cli login`. Inside a container that can't see the host's HF cache,
 bypass cache discovery by passing the checkpoint explicitly:
 
@@ -70,7 +70,8 @@ python segmentation/run_ma_masks.py \
 > **Run from the repository root.** The bare `--cfg` default (`configs/...`) only
 > resolves when launched from inside `segmentation/`, so pass the config
 > explicitly: add `--cfg segmentation/configs/sam2.yaml` for SAM2 runs, or
-> `--cfg segmentation/configs/sam3.yaml` for `sam3` / `sam3_prompt`.
+> `--cfg segmentation/configs/sam3.yaml` for `sam3` / `sam3_prompt` /
+> `sam3_prompt_light`.
 
 ### Basic (NPZ input, SAM2)
 
