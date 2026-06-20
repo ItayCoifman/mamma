@@ -337,7 +337,48 @@ def _to_relative_points(points, width, height):
     return rel
 
 
-class _Sam3VideoAdapter:
+class _Sam3TextDetectMixin:
+    """Open-vocabulary person detection via SAM3's own detector.
+
+    Both SAM3 video adapters already hold a ``Sam3ImageOnVideoMultiGPU`` detector
+    (the tracker shares its backbone; the session predictor exposes it at
+    ``model.detector``). Pointing ``self._detector`` at it lets us text-detect
+    "person" on a frame with **no extra model load** — a drop-in replacement for
+    YOLO that returns the same ``(bbox_xyxy, score)`` the pipeline expects, so
+    anchors / bootstrap / cross-camera matching are reused unchanged. (issue #14)
+    """
+
+    _detector = None
+    _text_proc = None
+
+    def text_detect(self, image_rgb, text="person", conf_thresh=0.5):
+        if self._detector is None:
+            raise RuntimeError("text_detect requires self._detector (a SAM3 detector) to be set")
+        if self._text_proc is None:
+            from sam3.model.sam3_image_processor import Sam3Processor
+            self._text_proc = Sam3Processor(self._detector)
+        import numpy as np
+        from PIL import Image
+        # Pass a PIL image: Sam3Processor.set_image reads dims as image.shape[-2:]
+        # for arrays, which mis-reads (H,W,3) numpy as width=3 → collapsed x-scale.
+        # PIL.size is read correctly, so boxes come back in true pixel coords.
+        pil = image_rgb if isinstance(image_rgb, Image.Image) else Image.fromarray(np.ascontiguousarray(image_rgb))
+        st = self._text_proc.set_image(pil)
+        st = self._text_proc.set_text_prompt(text, st)
+        boxes, scores = st.get("boxes"), st.get("scores")
+        out = []
+        if boxes is None or scores is None:
+            return out
+        for b, s in zip(boxes, scores):
+            sc = float(s)
+            if sc < conf_thresh:
+                continue
+            bb = b.detach().cpu().numpy() if hasattr(b, "detach") else np.asarray(b)
+            out.append((bb.astype(np.float32).reshape(-1)[:4], sc))
+        return out
+
+
+class _Sam3VideoAdapter(_Sam3TextDetectMixin):
     """
     Adapter wrapping SAM3's tracker to match SAM2's video predictor API.
 
@@ -355,44 +396,10 @@ class _Sam3VideoAdapter:
         self._tracker.backbone = sam3_model.detector.backbone
         self._video_width = None
         self._video_height = None
-        # sam3_prompt_light: keep the detector so we can run open-vocabulary text
-        # detection ("person") on init/anchor frames in place of YOLO, using the
-        # *same* model the tracker already loaded — a lean alternative to the 16x
-        # multiplex session predictor (which costs ~2x the VRAM). (issue #14)
+        # sam3_prompt_light: keep the detector for text_detect (mixin) — the lean
+        # alternative to the 16x multiplex session predictor. (issue #14)
         self._detector = sam3_model.detector if keep_detector else None
         self._text_proc = None
-
-    def text_detect(self, image_rgb, text="person", conf_thresh=0.5):
-        """Open-vocabulary detection on one RGB frame via SAM3's detector.
-
-        Returns a list of (bbox_xyxy float32, score) for instances scoring above
-        conf_thresh. Mirrors what YOLO provides so the rest of the pipeline
-        (anchors, tracking, cross-camera matching) is reused unchanged.
-        """
-        if self._detector is None:
-            raise RuntimeError("text_detect requires the adapter built with keep_detector=True")
-        if self._text_proc is None:
-            from sam3.model.sam3_image_processor import Sam3Processor
-            self._text_proc = Sam3Processor(self._detector)
-        import numpy as np
-        from PIL import Image
-        # Pass a PIL image: Sam3Processor.set_image reads dims as image.shape[-2:]
-        # for arrays, which mis-reads (H,W,3) numpy as width=3 → collapsed x-scale.
-        # PIL.size is read correctly, so boxes come back in true pixel coords.
-        pil = Image.fromarray(np.ascontiguousarray(image_rgb)) if not isinstance(image_rgb, Image.Image) else image_rgb
-        st = self._text_proc.set_image(pil)
-        st = self._text_proc.set_text_prompt(text, st)
-        boxes, scores = st.get("boxes"), st.get("scores")
-        out = []
-        if boxes is None or scores is None:
-            return out
-        for b, s in zip(boxes, scores):
-            sc = float(s)
-            if sc < conf_thresh:
-                continue
-            bb = b.detach().cpu().numpy() if hasattr(b, "detach") else np.asarray(b)
-            out.append((bb.astype(np.float32).reshape(-1)[:4], sc))
-        return out
 
     def init_state(self, video_path, **kwargs):
         state = self._tracker.init_state(video_path=video_path, **kwargs)
@@ -457,7 +464,7 @@ class _Sam3VideoAdapter:
             yield frame_idx, obj_ids, video_res_masks
 
 
-class _Sam3PromptVideoAdapter:
+class _Sam3PromptVideoAdapter(_Sam3TextDetectMixin):
     """
     Adapter wrapping SAM3's video predictor (session-based API with text prompts).
 
@@ -485,6 +492,11 @@ class _Sam3PromptVideoAdapter:
         self._session_id = None
         self._video_width = None
         self._video_height = None
+        # Reuse the predictor's own (already-loaded) image detector for text_detect
+        # (mixin) — replaces the redundant YOLO call in the multi-view bootstrap,
+        # with no extra model load. (issue #14)
+        self._detector = getattr(getattr(self._predictor, "model", None), "detector", None)
+        self._text_proc = None
 
     def _apply_tracking_overrides(self, overrides):
         """Override SAM3 tracking config on the live model after construction.

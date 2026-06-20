@@ -187,12 +187,14 @@ class SegmentMultipleFrames:
             tracking_overrides=tracking_overrides,
         )
 
-        # sam3_prompt_light detects people with SAM3's own text detector, so YOLO
-        # is never used — skip loading it (saves ~0.2 GB + the checkpoint need).
-        if sam_version == "sam3_prompt_light":
+        # sam3_prompt / sam3_prompt_light detect people with SAM3's own text
+        # detector, so YOLO is never used — skip loading it (saves ~0.2 GB + the
+        # checkpoint need). For sam3_prompt this also drops the redundant YOLO that
+        # the multi-view bootstrap used to call. (issue #14)
+        if sam_version in ("sam3_prompt", "sam3_prompt_light"):
             self.yolo_model = None
             if yolo_checkpoint:
-                self._log_info("sam3_prompt_light: YOLO not loaded (SAM3 text detection is used).")
+                self._log_info(f"{sam_version}: YOLO not loaded (SAM3 text detection is used).")
         else:
             if not yolo_checkpoint or not os.path.isfile(yolo_checkpoint):
                 raise FileNotFoundError(f"YOLO checkpoint file not found: {yolo_checkpoint}")
@@ -4572,10 +4574,13 @@ class SegmentMultipleFrames:
         else:
             with Image.open(img_or_path) as pil_img:
                 img = pil_img.copy()
-        # sam3_prompt_light: detect people with SAM3's own open-vocabulary text
-        # detector ("person") instead of YOLO — same (img, [(crop,feat,bbox,score)])
-        # contract, so all downstream anchor/matching/tracking code is unchanged.
-        if self.sam_version == "sam3_prompt_light":
+        # sam3_prompt / sam3_prompt_light: detect people with SAM3's own
+        # open-vocabulary text detector ("person") instead of YOLO — same
+        # (img, [(crop,feat,bbox,score)]) contract, so all downstream
+        # anchor/bootstrap/matching code is unchanged. For sam3_prompt this
+        # removes the redundant YOLO detection in the multi-view bootstrap (the
+        # only place sam3_prompt called YOLO); the detector is already loaded. (issue #14)
+        if self.sam_version in ("sam3_prompt", "sam3_prompt_light"):
             return self._collect_sam3_text_detections(img, conf_thresh, include_clip_features)
         out = self.yolo_model(img, verbose=False)
         detections = []

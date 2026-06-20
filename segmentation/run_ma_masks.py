@@ -155,8 +155,9 @@ SAM backends:
 
     args = parser.parse_args()
 
-    # YOLO is required for every backend except sam3_prompt_light (SAM3 text detect).
-    if args.sam_version != "sam3_prompt_light" and not args.yolo_checkpoint:
+    # YOLO is required only for the YOLO-based backends; sam3_prompt and
+    # sam3_prompt_light detect via SAM3 text.
+    if args.sam_version not in ("sam3_prompt", "sam3_prompt_light") and not args.yolo_checkpoint:
         logger.error(f"--yolo_checkpoint is required for --sam_version {args.sam_version}.")
         return
 
