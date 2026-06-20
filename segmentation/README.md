@@ -12,13 +12,14 @@ The pipeline processes one camera at a time. The **init camera** (specified via 
 camera by default) is used to define the people that we want to track. On each **subsequent camera**, it detects people
 and matches them to the init camera's IDs.
 
-**Three detection modes are available:**
+**Four detection modes are available:**
 
-| Mode                        | Description                                                     | YOLO? |
-|-----------------------------|-----------------------------------------------------------------|:-----:|
-| `--sam_version sam2`        | YOLO detects people → SAM2 tracks with multi-frame bbox anchors |  Yes  |
-| `--sam_version sam3`        | YOLO detects people → SAM3 tracks (single bbox anchor)          |  Yes  |
-| `--sam_version sam3_prompt` | SAM3 text prompt `"person"` + SAM3 tracks all people            |  No   |
+| Mode                              | Description                                                          | YOLO? |
+|-----------------------------------|---------------------------------------------------------------------|:-----:|
+| `--sam_version sam2`              | YOLO detects people → SAM2 tracks with multi-frame bbox anchors      |  Yes  |
+| `--sam_version sam3`              | YOLO detects people → SAM3 tracks (single bbox anchor)               |  Yes  |
+| `--sam_version sam3_prompt`       | SAM3 text prompt `"person"` (multiplex session) + SAM3 tracks all    |  No   |
+| `--sam_version sam3_prompt_light` | SAM3 text prompt `"person"` (detector) → SAM3 tracks — ~20% less VRAM, no OOM on long clips; cross-camera IDs slightly less robust on 4–5 person scenes |  No   |
 
 Alternatively, **instead of automatically** defining the people to be tracked, the `--interactive` opens a GUI on the
 init camera where you can manually click on the people (keys 0-9 to switch person, left-click to mark, right-click to
@@ -152,10 +153,10 @@ Saves time and disk by skipping overlay images and MP4. Mask PNGs and `masks.npy
 
 Config files in `configs/` control all parameters. Each argument is documented inline.
 
-| File (pass via `--cfg`, from repo root)  | --sam_version              |
-|------------------------------------------|----------------------------|
-| `segmentation/configs/sam2.yaml`         | For `sam2`                 |
-| `segmentation/configs/sam3.yaml`         | For `sam3` + `sam3_prompt` |
+| File (pass via `--cfg`, from repo root)  | --sam_version                                  |
+|------------------------------------------|------------------------------------------------|
+| `segmentation/configs/sam2.yaml`         | For `sam2`                                     |
+| `segmentation/configs/sam3.yaml`         | For `sam3` + `sam3_prompt` + `sam3_prompt_light` |
 
 Key options:
 
