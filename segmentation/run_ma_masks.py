@@ -139,6 +139,15 @@ SAM backends:
                         help='Skip collage video generation at the end')
     parser.add_argument('--skip_masked_outputs', action='store_true',
                         help='Skip overlay visualization images and MP4 (saves time/disk)')
+    parser.add_argument('--debug_crop_summary', action='store_true',
+                        help='Render per-person crop-summary + t-SNE + cross-camera '
+                             'debug PNGs (off by default; pure viz, costs wall time). '
+                             'The mask PNGs and masks.npy cache are produced either way.')
+    parser.add_argument('--debug_full_masks_npy', action='store_true',
+                        help='Keep full-res frames + masks in masks.npy (~100x bigger). '
+                             'Off by default: masks.npy is slimmed to what matching/resume '
+                             'need (centroids + crops + features); full masks remain as the '
+                             'per-frame mask PNGs.')
 
     args = parser.parse_args()
 
@@ -234,6 +243,16 @@ SAM backends:
         assignment_config.setdefault("exports", {})["skip_masked_outputs"] = True
         # Collage requires masked_outputs videos, so skip it too
         args.skip_collage = True
+
+    if args.debug_crop_summary:
+        if assignment_config is None:
+            assignment_config = {}
+        assignment_config.setdefault("exports", {})["debug_crop_summary"] = True
+
+    if args.debug_full_masks_npy:
+        if assignment_config is None:
+            assignment_config = {}
+        assignment_config.setdefault("exports", {})["debug_full_masks_npy"] = True
 
     process_seq(
         data_folder=data_folder,

@@ -15,6 +15,7 @@ from ultralytics import YOLO
 import open_clip
 
 from core.logging import logger
+from core.mask_store import MaskStore
 from core.predictor_factory import build_video_predictor
 from core.frame_source import ImageFileSource, VideoSource, frame_source_from_cam_data
 from utils.drawing import show_box, show_mask_cv2
@@ -282,15 +283,19 @@ class SegmentMultipleFrames:
         return False
 
     def run_propagation(self, inference_state, cam_name="", image_size=None):
-        # run propagation throughout the video and collect the results in a dict
-        video_segments = {}  # video_segments contains the per-frame segmentation results
+        # Run propagation and spill each frame's masks to disk as they are
+        # produced (issue #14). The previous code accumulated every frame's
+        # full-resolution masks in an in-RAM dict (~5 GB/camera on long clips,
+        # the user-reported host-RAM blow-up); MaskStore keeps the same content
+        # bit-packed on disk so peak RAM is O(1 frame). Behaviour is unchanged.
+        video_segments = MaskStore()
         self._log_info("Starting SAM propagation: forward pass.")
         with torch.inference_mode():
             for frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state, reverse=False):
-                video_segments[frame_idx] = {
+                video_segments.set_frame(frame_idx, {
                     out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
                     for i, out_obj_id in enumerate(out_obj_ids)
-                }
+                })
 
             sam_cfg = self.assignment_config.get("sam")
             if sam_cfg is None:
@@ -301,24 +306,17 @@ class SegmentMultipleFrames:
                 # run propagation backwards as the annotation can be in the middle of the video
                 self._log_info("Starting SAM propagation: backward pass.")
                 for frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state, reverse=True):
-                    video_segments[frame_idx] = {
+                    video_segments.set_frame(frame_idx, {
                         out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
                         for i, out_obj_id in enumerate(out_obj_ids)
-                    }
-        video_segments = dict(sorted(video_segments.items()))
+                    })
 
         # Unified post-processing: merge duplicate tracklets + discard tiny ones.
         # Infer image_size from propagated masks if not provided.
-        if image_size is None and video_segments:
-            first_seg = next(iter(video_segments.values()))
-            if first_seg:
-                first_mask = next(iter(first_seg.values()))
-                m = first_mask[0] if first_mask.ndim == 3 else first_mask
-                image_size = (m.shape[1], m.shape[0])  # (W, H)
+        if image_size is None:
+            image_size = video_segments.image_size()
 
-        detected_ids = sorted(set(
-            oid for seg in video_segments.values() for oid in seg
-        ))
+        detected_ids = video_segments.all_obj_ids()
         video_segments, detected_ids = self._postprocess_tracklets(
             cam_name or "SAM", video_segments, detected_ids, image_size=image_size,
         )
@@ -439,6 +437,36 @@ class SegmentMultipleFrames:
         )
         return sanitized_dir, replaced
 
+    def _sam_offload_kwargs(self, n_frames=None):
+        """Resolve proactive SAM CPU-offload flags from the ``sam`` config (issue #14).
+
+        ``offload_video_to_cpu`` defaults ON: it only relocates the decoded-frame
+        tensor to the host (identical masks, small overhead per SAM docstring) and
+        is what keeps VRAM bounded on long / many-camera clips.
+        ``offload_state_to_cpu`` defaults to ``"auto"``: enabled once a clip is long
+        enough (``offload_state_min_frames``, default 1500) that the per-frame
+        memory bank would otherwise dominate VRAM. Both accept explicit
+        true/false to force the behaviour.
+
+        Only applies to the init_state backends (sam2 and the sam3 tracker); the
+        sam3_prompt session API bounds memory via its own defaults
+        (max_cond_frames_in_attn=4) plus the disk-backed MaskStore.
+        """
+        sam_cfg = self.assignment_config.get("sam")
+        if not sam_cfg:
+            sam_cfg = self.assignment_config.get("sam2", {}) or {}
+        video = bool(sam_cfg.get("offload_video_to_cpu", True))
+        state = sam_cfg.get("offload_state_to_cpu", "auto")
+        if isinstance(state, str):
+            if state.strip().lower() == "auto":
+                thr = int(sam_cfg.get("offload_state_min_frames", 1500))
+                state = bool(n_frames is not None and n_frames >= thr)
+            else:
+                state = state.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            state = bool(state)
+        return {"offload_video_to_cpu": video, "offload_state_to_cpu": state}
+
     def _init_state_with_fallback(self, video_dir, frame_names, output_path, context_name):
         """
         Robust SAM init_state with multiple fallback strategies.
@@ -457,9 +485,46 @@ class SegmentMultipleFrames:
         path with frame names would treat the file as a directory (ENOTDIR) —
         so the original init error is re-raised instead of attempting it.
         """
+        # Opt-in float16 frame storage (default off → byte-identical). Halves the
+        # decoded-frame tensor (CPU or GPU) when enabled via sam.fp16_frames.
+        from core.predictor_factory import set_frame_storage_fp16
+        _sam_cfg = self.assignment_config.get("sam") or self.assignment_config.get("sam2", {}) or {}
+        set_frame_storage_fp16(bool(_sam_cfg.get("fp16_frames", False)))
+
+        # Proactive CPU offload (issue #14): SAM loads the whole decoded video
+        # into VRAM at init_state, so VRAM grows with frame count. We pass the
+        # offload flags up front (offload_video_to_cpu defaults ON — it only
+        # relocates tensors to the host, masks are identical) so long / many-
+        # camera clips don't OOM in the first place. The reactive retry below is
+        # the backstop if even that is not enough or offload was disabled.
+        n_frames = len(frame_names) if frame_names else None
+        offload = self._sam_offload_kwargs(n_frames)
         try:
-            state = self.predictor.init_state(video_path=video_dir)
+            try:
+                state = self.predictor.init_state(video_path=video_dir, **offload)
+            except TypeError:
+                # Backend's init_state doesn't accept offload kwargs — plain call.
+                state = self.predictor.init_state(video_path=video_dir)
             return state, video_dir
+        except torch.cuda.OutOfMemoryError as oom:
+            # Proactive offload was not enough (or was disabled): force full CPU
+            # offload and retry. Frames and per-frame state live on the host and
+            # stream to the GPU as needed — bounded GPU memory, identical masks,
+            # somewhat slower. Only triggered on an actual OOM.
+            self._log_warn(
+                f"[{context_name}] SAM init_state hit CUDA OOM; retrying with full CPU "
+                f"offload (offload_video_to_cpu / offload_state_to_cpu). {oom}"
+            )
+            torch.cuda.empty_cache()
+            try:
+                state = self.predictor.init_state(
+                    video_path=video_dir,
+                    offload_video_to_cpu=True,
+                    offload_state_to_cpu=True,
+                )
+                return state, video_dir
+            except Exception as exc:
+                init_error = exc
         except Exception as exc:
             init_error = exc
 
@@ -477,7 +542,10 @@ class SegmentMultipleFrames:
         )
         sanitized_dir, replaced = self._build_sanitized_video_dir(video_dir, frame_names, output_path)
         try:
-            state = self.predictor.init_state(video_path=sanitized_dir)
+            try:
+                state = self.predictor.init_state(video_path=sanitized_dir, **offload)
+            except TypeError:
+                state = self.predictor.init_state(video_path=sanitized_dir)
         except Exception:
             shutil.rmtree(sanitized_dir, ignore_errors=True)
             raise
@@ -988,10 +1056,18 @@ class SegmentMultipleFrames:
 
     def _reference_point_from_mask_data(self, obj_data, frame_idx):
         frames = np.asarray(obj_data.get("frame", []), dtype=np.int32)
-        masks = obj_data.get("mask", [])
-        if frames.size == 0 or len(masks) == 0:
+        if frames.size == 0:
             return None
         nearest = int(np.argmin(np.abs(frames - int(frame_idx))))
+        # Prefer the precomputed centroid (slim cache); fall back to the full
+        # mask for legacy / full-dump caches. Identical value either way.
+        cents = obj_data.get("centroid_xy")
+        if cents is not None and nearest < len(cents) and cents[nearest] is not None:
+            x, y = cents[nearest]
+            return np.array([float(x), float(y), 1.0], dtype=np.float64)
+        masks = obj_data.get("mask", [])
+        if len(masks) == 0:
+            return None
         mask = np.asarray(masks[nearest])
         return self._mask_centroid_xy1(mask)
 
@@ -1382,14 +1458,29 @@ class SegmentMultipleFrames:
 
     def save_images_from_video(self, inference_state, video_segments, obj_ids, output_path, vis_frame_stride = 10):
         save_masks = {obj_id: {"img": [], "mask": [], "frame": [], "iou": [], "bbox": []} for obj_id in obj_ids}
-        images = inference_state['images'].detach().cpu() # Tensor of size (N, 3, H, W)
+        # SAM keeps the decoded frames here as a (N, 3, H, W) tensor (already on
+        # the host when CPU offload is active). Index ONE frame at a time below
+        # instead of unnormalizing+copying the whole video into an (N, H, W, 3)
+        # uint8 array — that materialized ~3 redundant full-video copies per
+        # camera on top of the mask RAM (issue #14).
+        images = inference_state['images']
         w_original = inference_state['video_width']
         h_original = inference_state['video_height']
+        # ``images`` may be a tensor or a lazy AsyncVideoFrameLoader (CPU offload).
+        n_frames = images.shape[0] if hasattr(images, "shape") else len(images)
 
-        images = images * self.img_std_sam + self.img_mean_sam  # Unnormalize
-        images = torch.clamp(images, 0, 1)  # Clamp to [0, 1]
-        images = (images.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)  # Convert to (N, H, W, 3)
-        n_frames = len(images)
+        # Per-frame unnormalize: 1x3x1x1 stats -> 3x1x1 for a single (3, H, W) frame.
+        std_chw = self.img_std_sam[0]
+        mean_chw = self.img_mean_sam[0]
+
+        def _frame_uint8(frame_idx):
+            frame = images[frame_idx]
+            if hasattr(frame, "detach"):
+                frame = frame.detach().cpu()
+            else:
+                frame = torch.as_tensor(np.asarray(frame))
+            frame = torch.clamp(frame.float() * std_chw + mean_chw, 0, 1)  # unnormalize
+            return (frame.permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # (H, W, 3)
         export_cfg = self.assignment_config.get("exports", {})
         skip_overlays = bool(export_cfg.get("skip_masked_outputs", False))
 
@@ -1410,7 +1501,7 @@ class SegmentMultipleFrames:
         def _process_frame(frame_idx):
             if frame_idx not in video_segments:
                 return
-            image = images[frame_idx]
+            image = _frame_uint8(frame_idx)
             image = cv2.resize(image, (w_original, h_original))
             masked_img = image.copy() if not skip_overlays else None
             frame_samples = []
@@ -1441,6 +1532,13 @@ class SegmentMultipleFrames:
                 executor.map(_process_frame, range(n_frames)),
                 total=n_frames,
             ))
+
+        # Masks are now fully written to disk PNGs; drop the spilled store and
+        # release cached CUDA blocks before the next camera (issue #14 cleanup).
+        if hasattr(video_segments, "close"):
+            video_segments.close()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Run bbox pruning on sampled frames
         for frame_idx in range(0, n_frames, vis_frame_stride):
@@ -1637,10 +1735,11 @@ class SegmentMultipleFrames:
             if masks is None:
                 self._log_warn(f"[{cam_name}] Initialization skipped: no valid person detections found.")
                 return None
-            self.save_picked_masks(masks, out_path)
+            self.save_picked_masks(masks, out_path, render_viz=self._debug_crop_summary())
             self.compute_clip_features(masks)
             if len(self.subject_feature_bank) == 0:
                 self.initialize_subject_feature_bank(masks, expected_subjects=expected_subjects)
+            self._finalize_mask_cache(masks, out_path)
 
         # Process new video
         else:
@@ -1672,12 +1771,14 @@ class SegmentMultipleFrames:
                     target_cam_data=cam_data,
                     expected_subjects=expected_subjects,
                 )
-            self.save_picked_masks(new_mask_data, out_path)
+            self.save_picked_masks(new_mask_data, out_path, render_viz=self._debug_crop_summary())
             self.compute_clip_features(new_mask_data)
-            try:
-                self.plot_tsne(new_mask_data, out_path)
-            except Exception as exc:
-                self._log_warn(f"Skipping t-SNE visualization due to runtime error: {exc}")
+            if self._debug_crop_summary():
+                try:
+                    self.plot_tsne(new_mask_data, out_path)
+                except Exception as exc:
+                    self._log_warn(f"Skipping t-SNE visualization due to runtime error: {exc}")
+            self._finalize_mask_cache(new_mask_data, out_path)
 
         # But still return the mask data from the first view
         # Alternatively, we could return the new_mask_data to be used in the next view
@@ -2236,14 +2337,17 @@ class SegmentMultipleFrames:
                 min_area = 1000
 
             for obj_id in list(detected_ids):
-                real_frames = sum(
-                    1 for fidx in video_segments
-                    if obj_id in video_segments[fidx] and (
-                        video_segments[fidx][obj_id][0] if video_segments[fidx][obj_id].ndim == 3
-                        else video_segments[fidx][obj_id]
-                    ).sum() >= min_area
-                )
-                total_frames = sum(1 for fidx in video_segments if obj_id in video_segments[fidx])
+                # Stream per-frame areas (one unpacked mask at a time) instead of
+                # holding every frame's masks in RAM.
+                real_frames = 0
+                total_frames = 0
+                for fidx in video_segments.frames():
+                    area = video_segments.obj_area(fidx, obj_id)
+                    if area is None:
+                        continue
+                    total_frames += 1
+                    if area >= min_area:
+                        real_frames += 1
                 if total_frames > 0 and real_frames / total_frames < min_frame_ratio:
                     self._log_warn(
                         f"[{cam_name}] Discarding tracklet {obj_id}: mask too small on "
@@ -2251,8 +2355,7 @@ class SegmentMultipleFrames:
                         f"(min_area={min_area}px, min_frame_ratio={min_frame_ratio})."
                     )
                     detected_ids = [d for d in detected_ids if d != obj_id]
-                    for fidx in video_segments:
-                        video_segments[fidx].pop(obj_id, None)
+                    video_segments.discard_obj(obj_id)
 
         return video_segments, detected_ids
 
@@ -2270,17 +2373,23 @@ class SegmentMultipleFrames:
         if len(detected_ids) < 2:
             return video_segments, detected_ids
 
-        sorted_frames = sorted(video_segments.keys())
+        sorted_frames = video_segments.frames()
         n_sample = min(sample_count, len(sorted_frames))
+        if n_sample == 0:
+            return video_segments, detected_ids
         sample_idxs = [sorted_frames[int(i)] for i in
                        np.linspace(0, len(sorted_frames) - 1, n_sample, dtype=int)]
+
+        # Load only the sampled frames once (≤ sample_count frames in RAM) for
+        # the area + IoU statistics, instead of re-reading from the store.
+        sampled = {fidx: video_segments.frame(fidx) for fidx in sample_idxs}
 
         # Compute average mask area per ID (for deciding which to keep)
         id_avg_area = {}
         for oid in detected_ids:
             areas = []
             for fidx in sample_idxs:
-                mask = video_segments[fidx].get(oid)
+                mask = sampled[fidx].get(oid)
                 if mask is not None:
                     m = mask[0] if mask.ndim == 3 else mask
                     areas.append(float(m.sum()))
@@ -2294,8 +2403,8 @@ class SegmentMultipleFrames:
                 oid_a, oid_b = ids[i], ids[j]
                 ious = []
                 for fidx in sample_idxs:
-                    mask_a = video_segments[fidx].get(oid_a)
-                    mask_b = video_segments[fidx].get(oid_b)
+                    mask_a = sampled[fidx].get(oid_a)
+                    mask_b = sampled[fidx].get(oid_b)
                     if mask_a is None or mask_b is None:
                         continue
                     ma = (mask_a[0] if mask_a.ndim == 3 else mask_a) > 0
@@ -2309,6 +2418,8 @@ class SegmentMultipleFrames:
 
         if not merge_pairs:
             return video_segments, detected_ids
+
+        del sampled  # free the sampled frames before the per-frame merge rewrites
 
         # Merge: absorb smaller into larger
         absorbed = set()
@@ -2327,16 +2438,10 @@ class SegmentMultipleFrames:
                 f"{drop}={id_avg_area[drop]:.0f})"
             )
 
-            # For frames where only the dropped ID exists, transfer its mask
-            for fidx in sorted_frames:
-                seg = video_segments[fidx]
-                has_keep = keep in seg and seg[keep] is not None
-                has_drop = drop in seg and seg[drop] is not None
-                if has_drop and not has_keep:
-                    seg[keep] = seg[drop]
-                # For frames where both exist, keep the larger mask (already in 'keep')
-                seg.pop(drop, None)
-
+            # Transfer the dropped ID's masks where only it exists, keep the
+            # larger mask where both exist, then remove the dropped ID. Done as a
+            # streaming per-frame rewrite in the store.
+            video_segments.merge_obj(drop=drop, keep=keep)
             absorbed.add(drop)
 
         # Update detected_ids
@@ -2398,14 +2503,27 @@ class SegmentMultipleFrames:
             f"(IDs: {detected_ids})."
         )
 
-        # Propagate
-        self._log_info(f"[{cam_name}] Propagating SAM3 text prompt through video.")
-        video_segments = predictor.propagate()
+        # Propagate — stream each frame's masks straight into the disk-backed
+        # store instead of returning one big in-RAM dict (issue #14).
+        # Optionally bound SAM3's per-frame output cache (cached_frame_outputs),
+        # which otherwise grows ~5x faster than the sam3 tracker path and OOMs on
+        # long clips. Opt-in via sam3.yaml: sam.sam3_prune_cache_window (frames).
+        sam_cfg = self.assignment_config.get("sam") or {}
+        prune_w = sam_cfg.get("sam3_prune_cache_window", None)
+        prune_w = int(prune_w) if prune_w not in (None, "", 0) else None
+        self._log_info(
+            f"[{cam_name}] Propagating SAM3 text prompt through video"
+            + (f" (cache prune window={prune_w}, keep prompt frame {best_frame})." if prune_w else ".")
+        )
+        video_segments = MaskStore()
+        predictor.propagate(sink=video_segments.set_frame,
+                            prune_cache_window=prune_w, keep_frames=(best_frame,))
         self._log_info(f"[{cam_name}] Propagation complete. {len(video_segments)} frame segments.")
         predictor.close_session()
 
         if not video_segments:
             self._log_warn(f"[{cam_name}] Propagation returned empty segments.")
+            video_segments.close()
             return None, None, None
 
         # Unified post-processing: merge duplicates + discard tiny tracklets
@@ -2640,7 +2758,12 @@ class SegmentMultipleFrames:
             frames, video_segments, id_remap, best_frame, output_path, cam_name,
         )
 
-        return self._sam3_prompt_build_masks(frames, video_segments, id_remap, output_path)
+        save_masks = self._sam3_prompt_build_masks(frames, video_segments, id_remap, output_path)
+        if hasattr(video_segments, "close"):
+            video_segments.close()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return save_masks
 
     # ── SAM3 prompt: non-init camera ─────────────────────────────────────────
 
@@ -2716,6 +2839,10 @@ class SegmentMultipleFrames:
 
         # Step 3: Build and save masks with remapped IDs
         save_masks = self._sam3_prompt_build_masks(frames, video_segments, id_remap, output_path)
+        if hasattr(video_segments, "close"):
+            video_segments.close()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Note: we intentionally do NOT update the feature bank after non-init
         # cameras in sam3_prompt mode. The remap can be wrong (especially for
@@ -4088,6 +4215,10 @@ class SegmentMultipleFrames:
 
     def compute_clip_features(self, mask_data):
         for mask_id, data in mask_data.items():
+            # Skip if features were already loaded (slim masks.npy resume).
+            existing = data.get("features")
+            if existing is not None and hasattr(existing, "shape") and len(existing) > 0:
+                continue
             # get the bounding boxes
             crops = data.get("img_bbx", [])
             features = self._encode_clip_batch(crops)
@@ -4166,10 +4297,82 @@ class SegmentMultipleFrames:
             plt.close()
 
 
-    def save_picked_masks(self, mask_data, output_folder):
-        self._log_info(f"Generating per-ID mask crop summaries in '{output_folder}'.")
+    def _debug_crop_summary(self):
+        """Whether to render the per-person crop-summary / t-SNE debug PNGs.
+
+        Off by default (issue #14 follow-up): these matplotlib renders are pure
+        debugging aids and cost wall time; the underlying img_bbx crops that feed
+        cross-camera matching are always built regardless. Enable with
+        ``exports.debug_crop_summary: true`` (or ``--debug_crop_summary``).
+        """
+        return bool(self.assignment_config.get("exports", {}).get("debug_crop_summary", False))
+
+    def _debug_full_masks_npy(self):
+        """Whether masks.npy should keep the full-res frames + masks.
+
+        Off by default: masks.npy is slimmed to what matching/resume need
+        (centroids + crops + features), ~100x smaller. The full-res masks remain
+        available as the per-frame mask PNGs. Enable with
+        ``exports.debug_full_masks_npy`` / ``--debug_full_masks_npy``.
+        """
+        return bool(self.assignment_config.get("exports", {}).get("debug_full_masks_npy", False))
+
+    def _compute_centroids(self, mask_data):
+        """Precompute each person's per-sampled-frame mask centroid (xy).
+
+        The cross-camera epipolar score only needs the centroid of each sampled
+        mask, not the full-res mask. Storing the centroid lets us drop the heavy
+        masks from the in-memory dict and from masks.npy while keeping matching
+        byte-identical. Aligned index-for-index with ``frame``. (issue #14)
+        """
+        for data in mask_data.values():
+            if not isinstance(data, dict) or "centroid_xy" in data:
+                continue
+            cents = []
+            for m in data.get("mask", []):
+                arr = np.asarray(m)
+                arr = arr[0] if arr.ndim == 3 else arr
+                c = self._mask_centroid_xy1(arr)
+                cents.append(None if c is None else [float(c[0]), float(c[1])])
+            data["centroid_xy"] = cents
+
+    def _slim_mask_record(self, mask_data):
+        """Drop the full-res frames + masks from an in-memory mask dict.
+
+        After img_bbx + features + centroids are computed, the full ``img`` and
+        ``mask`` arrays are never read again — yet the init camera's dict is held
+        resident for the whole multi-camera run and is the bulk of masks.npy.
+        Drop them; matching keeps using img_bbx / features / centroid_xy. The
+        full-res masks remain on disk as the per-frame mask PNGs.
+        """
+        for data in mask_data.values():
+            if isinstance(data, dict):
+                data.pop("img", None)
+                data.pop("mask", None)
+
+    def _finalize_mask_cache(self, mask_data, out_path):
+        """Precompute centroids and (unless full-dump) slim the dict + re-save.
+
+        masks.npy was written full by the inner segmentation method (a crash-safe
+        completion marker); here we replace it with the slim record once the
+        matching essentials exist. With ``debug_full_masks_npy`` we keep the full
+        cache instead. (issue #14)
+        """
+        self._compute_centroids(mask_data)
+        if self._debug_full_masks_npy():
+            return  # keep the full masks.npy written by the inner method
+        self._slim_mask_record(mask_data)
+        try:
+            np.save(os.path.join(out_path, "masks.npy"), mask_data)
+        except Exception as exc:  # noqa: BLE001
+            self._log_warn(f"Failed to re-save slim mask cache at '{out_path}': {exc}")
+
+    def save_picked_masks(self, mask_data, output_folder, render_viz=True):
+        if render_viz:
+            self._log_info(f"Generating per-ID mask crop summaries in '{output_folder}'.")
         if len(mask_data) == 0:
-            self._log_warn("No mask data available to summarize.")
+            if render_viz:
+                self._log_warn("No mask data available to summarize.")
             return
 
         first_key = sorted(mask_data.keys())[0]
@@ -4237,50 +4440,64 @@ class SegmentMultipleFrames:
                     return None
             return x1, y1, x2, y2
 
-        # plot data
+        # Build per-person crops (img_bbx) — ALWAYS, because img_bbx feeds the
+        # cross-camera CLIP gallery (matching). The matplotlib crop-summary PNG
+        # is pure debugging viz and is only rendered when render_viz is set
+        # (exports.debug_crop_summary); the img_bbx output is identical either
+        # way, so cross-camera matching is unaffected by the flag. (issue #14 follow-up)
         for obj_id, data in mask_data.items():
+            # Slim cache (resume): full frames were dropped but img_bbx is already
+            # present — nothing to rebuild or render for this person.
+            if "img" not in data:
+                data.setdefault("img_bbx", [])
+                data.setdefault("img_bbx_frame", [])
+                continue
             imgs = data["img"]
             masks = data["mask"]
             frames = data["frame"]
             bboxs = data["bbox"]
             data["img_bbx"] = []
             data["img_bbx_frame"] = []
-            cols = 3  # Number of columns in the grid
-            rows = max(1, (len(frames) + cols - 1) // cols)  # Calculate the number of rows needed
-            fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
-            axes = axes.flatten()
+            axes = None
+            if render_viz:
+                cols = 3
+                rows = max(1, (len(frames) + cols - 1) // cols)
+                fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
+                axes = axes.flatten()
             skipped = 0
             for idx, (img, mask, frame_idx, bbx) in enumerate(zip(imgs, masks, frames, bboxs)):
-                ax = axes[idx]
+                ax = axes[idx] if render_viz else None
                 coords = _sanitize_bbox(bbx, img.shape, mask_arr=mask)
                 if coords is None:
                     skipped += 1
-                    ax.text(0.5, 0.5, "Invalid/empty bbox", ha="center", va="center")
-                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                    ax.axis("off")
+                    if render_viz:
+                        ax.text(0.5, 0.5, "Invalid/empty bbox", ha="center", va="center")
+                        ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                        ax.axis("off")
                     continue
                 x1, y1, x2, y2 = coords
                 img_bbx = img[y1:y2, x1:x2]
                 if img_bbx.size == 0:
                     skipped += 1
-                    ax.text(0.5, 0.5, "Empty crop", ha="center", va="center")
-                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                    ax.axis("off")
+                    if render_viz:
+                        ax.text(0.5, 0.5, "Empty crop", ha="center", va="center")
+                        ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                        ax.axis("off")
                     continue
 
                 data["img_bbx"].append(img_bbx)
                 data["img_bbx_frame"].append(int(frame_idx))
-                ax.imshow(img_bbx)
-                ax.set_title(f"Object {obj_id} Frame {frame_idx}")
-                ax.axis("off")
+                if render_viz:
+                    ax.imshow(img_bbx)
+                    ax.set_title(f"Object {obj_id} Frame {frame_idx}")
+                    ax.axis("off")
 
-            # Hide any unused subplots
-            for ax in axes[len(frames):]:
-                ax.axis("off")
-
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_folder, f"person_{obj_id:02d}_crop_summary.png"))
-            plt.close()
+            if render_viz:
+                for ax in axes[len(frames):]:
+                    ax.axis("off")
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_folder, f"person_{obj_id:02d}_crop_summary.png"))
+                plt.close()
             if skipped > 0:
                 self._log_warn(
                     f"Object {obj_id}: skipped {skipped} invalid/empty bbox crops while generating summaries."
