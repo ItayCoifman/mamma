@@ -57,24 +57,26 @@ against ground-truth masks. Numbers are indicative, not a formal benchmark.
 | `sam3_prompt`       | ~11.5 GB  | ⚠️ limited (~700 frames, then OOM) | No |
 | `sam3_prompt_light` | ~8.8 GB   | ✅ good (handles full clips) | No |
 
-Mask accuracy is comparable across all modes (all recover every ground-truth
-person; mean IoU ~0.96–0.97, cross-view IDs near-perfect). The practical
-differences are VRAM and how long a clip each can handle. Rules of thumb:
+On the clip tested, all modes recovered every ground-truth person with comparable
+mask quality (mean IoU ~0.96–0.97); the small accuracy differences were within
+run-to-run noise, so we don't rank modes by accuracy. The clear, repeatable
+differences are **VRAM** and **how long a clip each can process**:
 
-- **Most efficient / longest sequences → `sam2`.** Lowest VRAM by far and the best
-  cross-view ID consistency; per-camera memory is bounded by CPU offload, so length
-  is limited by host RAM (≈4 GB + 17 MB/frame), not VRAM.
-- **Best mask quality → `sam3` family** (~1 IoU point tighter than `sam2`).
-- **No YOLO / text-prompt convenience → `sam3_prompt_light`** — `sam3_prompt`'s
-  quality at ~25 % less VRAM and no long-clip OOM (cross-camera IDs can be slightly
-  less robust on 4–5 person scenes).
-- **`sam3_prompt`** is the marginal accuracy leader but the heaviest (16× multiplex
-  session); prefer `sam3_prompt_light` unless you specifically need it.
+- **Lowest VRAM / longest sequences → `sam2`** (then `sam3`). Both keep decoded
+  frames and tracker state on the host via CPU offload, so per-camera VRAM stays
+  bounded and clip length is limited by host RAM rather than VRAM (`sam2` ran 1200+
+  frames in testing).
+- **Avoid `sam3_prompt` for long clips** — its session cache grows with frame count
+  and OOMs around ~700 frames on a 24 GB GPU. Use `sam3_prompt_light` instead, which
+  handles full-length clips at lower VRAM.
+- **No YOLO needed → `sam3_prompt` / `sam3_prompt_light`** (they detect via SAM3
+  text). One measured caveat: `sam3_prompt_light`'s cross-camera ID matching was
+  slightly less consistent than the other modes on a 4-person clip.
 
-Per-camera memory scales with sequence length, not people count. `sam2`/`sam3` use
-CPU offload (`sam.offload_video_to_cpu`, `offload_state_to_cpu`, `fp16_frames`) to
-bound VRAM; `sam3_prompt` is capped by an internal cache prune
-(`sam.sam3_prune_cache_window`).
+Per-camera memory is driven mainly by sequence length. `sam2`, `sam3` and
+`sam3_prompt_light` bound VRAM via CPU offload (`sam.offload_video_to_cpu`,
+`offload_state_to_cpu`, `fp16_frames`); `sam3_prompt` (session API) is capped by an
+internal cache prune (`sam.sam3_prune_cache_window`).
 
 ## Installation
 
@@ -82,7 +84,9 @@ Installation is managed by the parent `mamma_release` repo. See [`docs/INSTALL.m
 
 - YOLO: `data/weights/yolo/yolo12x.pt`
 - SAM 2: `data/weights/sam2/sam2.1_hiera_large.pt`
-- SAM 3: loaded lazily from the Hugging Face cache (no local file)
+- SAM 3: downloaded on first use to the local Hugging Face cache (e.g.
+  `~/.cache/huggingface/.../models--facebook--sam3`), not under `data/weights/`. Pass
+  `--sam_checkpoint <snapshot>/sam3.pt` to use a specific cached file (see below).
 
 SAM 3 weights come from a **gated** Hugging Face model, so the SAM3 backends
 (`sam3`, `sam3_prompt`, `sam3_prompt_light`) need an approved account and a local
