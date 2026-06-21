@@ -524,11 +524,15 @@ class SegmentMultipleFrames:
             )
             torch.cuda.empty_cache()
             try:
-                state = self.predictor.init_state(
-                    video_path=video_dir,
-                    offload_video_to_cpu=True,
-                    offload_state_to_cpu=True,
-                )
+                try:
+                    state = self.predictor.init_state(
+                        video_path=video_dir,
+                        offload_video_to_cpu=True,
+                        offload_state_to_cpu=True,
+                    )
+                except TypeError:
+                    # Backend's init_state doesn't accept offload kwargs — plain call.
+                    state = self.predictor.init_state(video_path=video_dir)
                 return state, video_dir
             except Exception as exc:
                 init_error = exc
@@ -1543,18 +1547,20 @@ class SegmentMultipleFrames:
                         save_masks[out_obj_id]["mask"].append(mask_bw)
                         save_masks[out_obj_id]["frame"].append(fidx)
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            list(tqdm.tqdm(
-                executor.map(_process_frame, range(n_frames)),
-                total=n_frames,
-            ))
-
-        # Masks are now fully written to disk PNGs; drop the spilled store and
-        # release cached CUDA blocks before the next camera (issue #14 cleanup).
-        if hasattr(video_segments, "close"):
-            video_segments.close()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(tqdm.tqdm(
+                    executor.map(_process_frame, range(n_frames)),
+                    total=n_frames,
+                ))
+        finally:
+            # Drop the spilled store and release cached CUDA blocks before the next
+            # camera — in a finally so the temp dir is removed even if frame
+            # processing raises (close() is idempotent). (issue #14 cleanup)
+            if hasattr(video_segments, "close"):
+                video_segments.close()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Run bbox pruning on sampled frames
         for frame_idx in range(0, n_frames, vis_frame_stride):
@@ -2532,21 +2538,27 @@ class SegmentMultipleFrames:
             + (f" (cache prune window={prune_w}, keep prompt frame {best_frame})." if prune_w else ".")
         )
         video_segments = MaskStore()
-        predictor.propagate(sink=video_segments.set_frame,
-                            prune_cache_window=prune_w, keep_frames=(best_frame,))
-        self._log_info(f"[{cam_name}] Propagation complete. {len(video_segments)} frame segments.")
-        predictor.close_session()
+        try:
+            predictor.propagate(sink=video_segments.set_frame,
+                                prune_cache_window=prune_w, keep_frames=(best_frame,))
+            self._log_info(f"[{cam_name}] Propagation complete. {len(video_segments)} frame segments.")
+            predictor.close_session()
 
-        if not video_segments:
-            self._log_warn(f"[{cam_name}] Propagation returned empty segments.")
+            if not video_segments:
+                self._log_warn(f"[{cam_name}] Propagation returned empty segments.")
+                video_segments.close()
+                return None, None, None
+
+            # Unified post-processing: merge duplicates + discard tiny tracklets
+            image_size = frames.image_size if frames is not None and len(frames) > 0 else None
+            video_segments, detected_ids = self._postprocess_tracklets(
+                cam_name, video_segments, detected_ids, image_size=image_size,
+            )
+        except Exception:
+            # Don't leak the spilled store if propagation/post-processing raises
+            # (close() is idempotent). (issue #14 cleanup)
             video_segments.close()
-            return None, None, None
-
-        # Unified post-processing: merge duplicates + discard tiny tracklets
-        image_size = frames.image_size if frames is not None and len(frames) > 0 else None
-        video_segments, detected_ids = self._postprocess_tracklets(
-            cam_name, video_segments, detected_ids, image_size=image_size,
-        )
+            raise
 
         return detected_ids, video_segments, best_frame
 
