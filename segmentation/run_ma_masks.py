@@ -92,17 +92,22 @@ SAM backends:
                              '(from --calibration) before SAM / YOLO. Default off.')
 
     # --- SAM backend ---
-    parser.add_argument('--sam_version', default='sam2', choices=['sam2', 'sam3', 'sam3_prompt'],
-                        help='SAM backend: sam2 (default), sam3 (tracker API), '
-                             'or sam3_prompt (text prompt "person" — no YOLO needed for init camera)')
+    parser.add_argument('--sam_version', default='sam2',
+                        choices=['sam2', 'sam3', 'sam3_prompt', 'sam3_prompt_light'],
+                        help='SAM backend: sam2 (default), sam3 (tracker API + YOLO), '
+                             'sam3_prompt (text prompt "person" via the full video '
+                             'predictor — heaviest VRAM), or sam3_prompt_light (text prompt '
+                             '"person" via SAM3 detector + lean tracker — no YOLO, lower VRAM '
+                             'than sam3_prompt and no long-clip OOM)')
     parser.add_argument('--sam_checkpoint', default=None,
                         help='Override SAM checkpoint path or HuggingFace model ID')
     parser.add_argument('--yolo-checkpoint', '--yolo_checkpoint',
-                        dest='yolo_checkpoint', required=True,
+                        dest='yolo_checkpoint', default=None,
                         help='Path to the YOLOv12-X person-detection weights '
-                             '(.pt file). The MAMMA inference runner injects '
-                             'this from MAMMA_YOLO_CHECKPOINT / .env.local; '
-                             'standalone callers must pass it explicitly.')
+                             '(.pt file). Required for all backends except '
+                             'sam3_prompt_light (which detects via SAM3 text). '
+                             'The MAMMA inference runner injects this from '
+                             'MAMMA_YOLO_CHECKPOINT / .env.local.')
 
     # --- Frame range ---
     parser.add_argument('--start', type=int, default=None,
@@ -144,16 +149,22 @@ SAM backends:
                              'debug PNGs (off by default; pure viz, costs wall time). '
                              'The mask PNGs and masks.npy cache are produced either way.')
     parser.add_argument('--debug_full_masks_npy', action='store_true',
-                        help='Keep full-res frames + masks in masks.npy (~100x bigger). '
+                        help='Keep full-res frames + masks in masks.npy (~10x bigger). '
                              'Off by default: masks.npy is slimmed to what matching/resume '
                              'need (centroids + crops + features); full masks remain as the '
                              'per-frame mask PNGs.')
 
     args = parser.parse_args()
 
+    # YOLO is required only for the YOLO-based backends; sam3_prompt and
+    # sam3_prompt_light detect via SAM3 text.
+    if args.sam_version not in ("sam3_prompt", "sam3_prompt_light") and not args.yolo_checkpoint:
+        logger.error(f"--yolo_checkpoint is required for --sam_version {args.sam_version}.")
+        return
+
     # Auto-select config based on sam_version if not specified
     if args.cfg is None:
-        if args.sam_version in ("sam3", "sam3_prompt"):
+        if args.sam_version in ("sam3", "sam3_prompt", "sam3_prompt_light"):
             args.cfg = "configs/sam3.yaml"
         else:
             args.cfg = "configs/sam2.yaml"

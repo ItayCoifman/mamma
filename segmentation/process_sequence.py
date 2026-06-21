@@ -254,12 +254,12 @@ def process_seq(
     undistort=False,
     calibration_path=None,
 ):
-    if not yolo_checkpoint:
+    if not yolo_checkpoint and sam_version not in ("sam3_prompt", "sam3_prompt_light"):
         raise ValueError(
-            "process_seq requires yolo_checkpoint. Callers must supply a "
-            "path to the YOLOv12-X weights — see --yolo-checkpoint on "
-            "run_ma_masks.py. The MAMMA inference runner injects this from "
-            "MAMMA_YOLO_CHECKPOINT / .env.local."
+            "process_seq requires yolo_checkpoint (except for sam3_prompt / "
+            "sam3_prompt_light, which detect via SAM3 text). Callers must supply a "
+            "path to the YOLOv12-X weights — see --yolo-checkpoint on run_ma_masks.py. "
+            "The MAMMA inference runner injects this from MAMMA_YOLO_CHECKPOINT / .env.local."
         )
     from core.pipeline import SegmentMultipleFrames
     from core.logging import enable_file_logging

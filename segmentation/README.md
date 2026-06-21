@@ -12,13 +12,14 @@ The pipeline processes one camera at a time. The **init camera** (specified via 
 camera by default) is used to define the people that we want to track. On each **subsequent camera**, it detects people
 and matches them to the init camera's IDs.
 
-**Three detection modes are available:**
+**Four detection modes are available:**
 
-| Mode                        | Description                                                     | YOLO? |
-|-----------------------------|-----------------------------------------------------------------|:-----:|
-| `--sam_version sam2`        | YOLO detects people → SAM2 tracks with multi-frame bbox anchors |  Yes  |
-| `--sam_version sam3`        | YOLO detects people → SAM3 tracks (single bbox anchor)          |  Yes  |
-| `--sam_version sam3_prompt` | SAM3 text prompt `"person"` + SAM3 tracks all people            |  No   |
+| Mode                              | Description                                                          | YOLO? |
+|-----------------------------------|---------------------------------------------------------------------|:-----:|
+| `--sam_version sam2`              | YOLO detects people → SAM2 tracks with multi-frame bbox anchors      |  Yes  |
+| `--sam_version sam3`              | YOLO detects people → SAM3 tracks (single bbox anchor)               |  Yes  |
+| `--sam_version sam3_prompt`       | SAM3 text prompt `"person"` detects **and** tracks, all in SAM3's full video predictor |  No   |
+| `--sam_version sam3_prompt_light` | Same text prompt `"person"`, but detection runs on SAM3's detector and tracking on the lean SAM3 tracker — lighter than `sam3_prompt` (see Performance below) |  No   |
 
 Alternatively, **instead of automatically** defining the people to be tracked, the `--interactive` opens a GUI on the
 init camera where you can manually click on the people (keys 0-9 to switch person, left-click to mark, right-click to
@@ -44,16 +45,51 @@ The **Hungarian algorithm** makes the final one-to-one ID assignment across came
 > the impact of occasional identity errors is often mitigated in the downstream **multi-view SMPL-X fitting** stage, where
 > cross-view association is constrained by epipolar geometry and supported by the majority of views with correct masks.
 
+## Performance & which mode to choose
+
+Measured on one 6-person, 4-camera, 150-frame clip (per camera, 24 GB GPU), scored
+against ground-truth masks. Numbers are indicative, not a formal benchmark.
+
+| Mode                | Peak VRAM | Long sequences? | YOLO |
+|---------------------|:---------:|:---------------:|:----:|
+| `sam2`              | **~4.4 GB** | ✅ best (CPU-offload bounded) | Yes |
+| `sam3`              | ~8 GB     | ✅ good (CPU-offload bounded) | Yes |
+| `sam3_prompt`       | ~11.5 GB  | ⚠️ limited (~700 frames, then OOM) | No |
+| `sam3_prompt_light` | ~8.8 GB   | ✅ good (handles full clips) | No |
+
+On the clip tested, all modes recovered every ground-truth person with comparable
+mask quality (mean IoU ~0.96–0.97); the small accuracy differences were within
+run-to-run noise, so we don't rank modes by accuracy. The clear, repeatable
+differences are **VRAM** and **how long a clip each can process**:
+
+- **Lowest VRAM / longest sequences → `sam2`** (then `sam3`). Both keep decoded
+  frames and tracker state on the host via CPU offload, so per-camera VRAM stays
+  bounded and clip length is limited by host RAM rather than VRAM (`sam2` ran 1200+
+  frames in testing).
+- **Avoid `sam3_prompt` for long clips** — its session cache grows with frame count
+  and OOMs around ~700 frames on a 24 GB GPU. Use `sam3_prompt_light` instead, which
+  handles full-length clips at lower VRAM.
+- **No YOLO needed → `sam3_prompt` / `sam3_prompt_light`** (they detect via SAM3
+  text). One measured caveat: `sam3_prompt_light`'s cross-camera ID matching was
+  slightly less consistent than the other modes on a 4-person clip.
+
+Per-camera memory is driven mainly by sequence length. `sam2`, `sam3` and
+`sam3_prompt_light` bound VRAM via CPU offload (`sam.offload_video_to_cpu`,
+`offload_state_to_cpu`, `fp16_frames`); `sam3_prompt` (session API) is capped by an
+internal cache prune (`sam.sam3_prune_cache_window`).
+
 ## Installation
 
 Installation is managed by the parent `mamma_release` repo. See [`docs/INSTALL.md`](../docs/INSTALL.md) for the full env + CUDA + weights setup (including SAM 3's gated Hugging Face access and the optional Apptainer/Docker container recipes shipped in this folder); activate `mamma` before running `run_ma_masks.py`. Default weight locations (used both by the runner and by standalone invocations):
 
 - YOLO: `data/weights/yolo/yolo12x.pt`
 - SAM 2: `data/weights/sam2/sam2.1_hiera_large.pt`
-- SAM 3: loaded lazily from the Hugging Face cache (no local file)
+- SAM 3: downloaded on first use to the local Hugging Face cache (e.g.
+  `~/.cache/huggingface/.../models--facebook--sam3`), not under `data/weights/`. Pass
+  `--sam_checkpoint <snapshot>/sam3.pt` to use a specific cached file (see below).
 
-SAM 3 weights come from a **gated** Hugging Face model, so `--sam_version sam3`
-and `--sam_version sam3_prompt` need an approved account and a local
+SAM 3 weights come from a **gated** Hugging Face model, so the SAM3 backends
+(`sam3`, `sam3_prompt`, `sam3_prompt_light`) need an approved account and a local
 `huggingface-cli login`. Inside a container that can't see the host's HF cache,
 bypass cache discovery by passing the checkpoint explicitly:
 
@@ -69,7 +105,8 @@ python segmentation/run_ma_masks.py \
 > **Run from the repository root.** The bare `--cfg` default (`configs/...`) only
 > resolves when launched from inside `segmentation/`, so pass the config
 > explicitly: add `--cfg segmentation/configs/sam2.yaml` for SAM2 runs, or
-> `--cfg segmentation/configs/sam3.yaml` for `sam3` / `sam3_prompt`.
+> `--cfg segmentation/configs/sam3.yaml` for `sam3` / `sam3_prompt` /
+> `sam3_prompt_light`.
 
 ### Basic (NPZ input, SAM2)
 
@@ -152,10 +189,10 @@ Saves time and disk by skipping overlay images and MP4. Mask PNGs and `masks.npy
 
 Config files in `configs/` control all parameters. Each argument is documented inline.
 
-| File (pass via `--cfg`, from repo root)  | --sam_version              |
-|------------------------------------------|----------------------------|
-| `segmentation/configs/sam2.yaml`         | For `sam2`                 |
-| `segmentation/configs/sam3.yaml`         | For `sam3` + `sam3_prompt` |
+| File (pass via `--cfg`, from repo root)  | --sam_version                                  |
+|------------------------------------------|------------------------------------------------|
+| `segmentation/configs/sam2.yaml`         | For `sam2`                                     |
+| `segmentation/configs/sam3.yaml`         | For `sam3` + `sam3_prompt` + `sam3_prompt_light` |
 
 Key options:
 
