@@ -50,14 +50,16 @@ The **Hungarian algorithm** makes the final one-to-one ID assignment across came
 Measured on one 6-person, 4-camera, 150-frame clip (per camera, 24 GB GPU), scored
 against ground-truth masks. Numbers are indicative, not a formal benchmark.
 
-| Mode                | Peak VRAM | Mask IoU | Cross-view IDs | Max length (24 GB) | YOLO |
-|---------------------|:---------:|:--------:|:--------------:|:------------------:|:----:|
-| `sam2`              | **~4.4 GB** | 0.96 | 6/6 | **very long** (CPU-offload bounded; 1200+ frames) | Yes |
-| `sam3`              | ~8 GB     | 0.97 | 5/6 | long (CPU-offload bounded) | Yes |
-| `sam3_prompt`       | ~11.5 GB  | **0.97** | 6/6 | ~700 frames (then OOM) | No |
-| `sam3_prompt_light` | ~8.8 GB   | 0.97 | 6/6 | full clips (~15 GB @ 743f) | No |
+| Mode                | Peak VRAM | Long sequences? | YOLO |
+|---------------------|:---------:|:---------------:|:----:|
+| `sam2`              | **~4.4 GB** | ✅ best (CPU-offload bounded) | Yes |
+| `sam3`              | ~8 GB     | ✅ good (CPU-offload bounded) | Yes |
+| `sam3_prompt`       | ~11.5 GB  | ⚠️ limited (~700 frames, then OOM) | No |
+| `sam3_prompt_light` | ~8.8 GB   | ✅ good (handles full clips) | No |
 
-All modes recover every ground-truth person; differences are small. Rules of thumb:
+Mask accuracy is comparable across all modes (all recover every ground-truth
+person; mean IoU ~0.96–0.97, cross-view IDs near-perfect). The practical
+differences are VRAM and how long a clip each can handle. Rules of thumb:
 
 - **Most efficient / longest sequences → `sam2`.** Lowest VRAM by far and the best
   cross-view ID consistency; per-camera memory is bounded by CPU offload, so length
