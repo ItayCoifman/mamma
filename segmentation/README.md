@@ -45,6 +45,35 @@ The **Hungarian algorithm** makes the final one-to-one ID assignment across came
 > the impact of occasional identity errors is often mitigated in the downstream **multi-view SMPL-X fitting** stage, where
 > cross-view association is constrained by epipolar geometry and supported by the majority of views with correct masks.
 
+## Performance & which mode to choose
+
+Measured on one 6-person, 4-camera, 150-frame clip (per camera, 24 GB GPU), scored
+against ground-truth masks. Numbers are indicative, not a formal benchmark.
+
+| Mode                | Peak VRAM | Mask IoU | Cross-view IDs | Max length (24 GB) | YOLO |
+|---------------------|:---------:|:--------:|:--------------:|:------------------:|:----:|
+| `sam2`              | **~4.4 GB** | 0.96 | 6/6 | **very long** (CPU-offload bounded; 1200+ frames) | Yes |
+| `sam3`              | ~8 GB     | 0.97 | 5/6 | long (CPU-offload bounded) | Yes |
+| `sam3_prompt`       | ~11.5 GB  | **0.97** | 6/6 | ~700 frames (then OOM) | No |
+| `sam3_prompt_light` | ~8.8 GB   | 0.97 | 6/6 | full clips (~15 GB @ 743f) | No |
+
+All modes recover every ground-truth person; differences are small. Rules of thumb:
+
+- **Most efficient / longest sequences → `sam2`.** Lowest VRAM by far and the best
+  cross-view ID consistency; per-camera memory is bounded by CPU offload, so length
+  is limited by host RAM (≈4 GB + 17 MB/frame), not VRAM.
+- **Best mask quality → `sam3` family** (~1 IoU point tighter than `sam2`).
+- **No YOLO / text-prompt convenience → `sam3_prompt_light`** — `sam3_prompt`'s
+  quality at ~25 % less VRAM and no long-clip OOM (cross-camera IDs can be slightly
+  less robust on 4–5 person scenes).
+- **`sam3_prompt`** is the marginal accuracy leader but the heaviest (16× multiplex
+  session); prefer `sam3_prompt_light` unless you specifically need it.
+
+Per-camera memory scales with sequence length, not people count. `sam2`/`sam3` use
+CPU offload (`sam.offload_video_to_cpu`, `offload_state_to_cpu`, `fp16_frames`) to
+bound VRAM; `sam3_prompt` is capped by an internal cache prune
+(`sam.sam3_prune_cache_window`).
+
 ## Installation
 
 Installation is managed by the parent `mamma_release` repo. See [`docs/INSTALL.md`](../docs/INSTALL.md) for the full env + CUDA + weights setup (including SAM 3's gated Hugging Face access and the optional Apptainer/Docker container recipes shipped in this folder); activate `mamma` before running `run_ma_masks.py`. Default weight locations (used both by the runner and by standalone invocations):
