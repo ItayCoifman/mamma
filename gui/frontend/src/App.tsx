@@ -7,6 +7,7 @@ import { ResultsList } from './components/ResultsList';
 import { CaptureDetail } from './components/CaptureDetail';
 import { CaptureManage } from './components/CaptureManage';
 import { Tasks } from './components/Tasks';
+import { Exporter } from './components/Exporter';
 import { Docs } from './components/Docs';
 import { Toaster } from './components/ui/sonner';
 import { CredentialsProvider } from './components/CredentialsContext';
@@ -24,7 +25,7 @@ import { CredentialsProvider } from './components/CredentialsContext';
  * Both detail screens are reachable from a list-tab click. `detailOrigin`
  * records which tab opened the detail so "Back" returns there.
  */
-type Tab = 'Home' | 'Captures' | 'Tasks' | 'Results' | 'Docs';
+type Tab = 'Home' | 'Captures' | 'Tasks' | 'Results' | 'Exporter' | 'Docs';
 /** A "capture detail" view appears under both Captures (manage) and Results
  *  (browse outputs) — distinct components, single shared origin tracker. */
 type View = Tab | 'CaptureManage' | 'CaptureResults';
@@ -99,6 +100,7 @@ export default function App() {
             <NavButton active={navActive === 'Captures'} onClick={() => goToTab('Captures')}>Captures</NavButton>
             <NavButton active={navActive === 'Tasks'} onClick={() => goToTab('Tasks')}>Tasks</NavButton>
             <NavButton active={navActive === 'Results'} onClick={() => goToTab('Results')}>Results</NavButton>
+            <NavButton active={navActive === 'Exporter'} onClick={() => goToTab('Exporter')}>Exporter</NavButton>
             <NavButton active={navActive === 'Docs'} onClick={() => goToTab('Docs')}>Docs</NavButton>
           </div>
         </div>
@@ -121,6 +123,7 @@ export default function App() {
             initialSubView={tasksInitialSubView}
           />
         )}
+        {view === 'Exporter' && <Exporter />}
         {view === 'Docs' && <Docs />}
         {view === 'Results' && (
           <ResultsList onOpen={openCaptureForResults} />
@@ -140,6 +143,7 @@ export default function App() {
             captureName={selectedCapture.name}
             onBack={() => goToTab(detailOrigin)}
             initial={outputsInitial ?? undefined}
+            onGoToExporter={() => goToTab('Exporter')}
           />
         )}
       </main>

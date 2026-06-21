@@ -668,6 +668,15 @@ def main(optim_cfg_fn, cam_names, metadata_data_pth:str, imgs_pth:str, paths: Pa
 
         save_prediction_fn = os.path.join(out_path, out_fn)
         os.makedirs(save_prediction_fn, exist_ok=True)
+        # Read the PREDICTION model's actual flat_hand_mean (the neutral model
+        # built by get_smplx_models, which uses the SMPL-X default for normal
+        # inference — NOT the rich/chi3d eval-only `flat_hand` above). Defensive:
+        # never let metadata stamping break a run for existing users.
+        try:
+            _export_flat_hand_mean = bool(smplx_model[body_id]["neutral"].flat_hand_mean)
+        except Exception:
+            _export_flat_hand_mean = False
+
         np.savez(os.path.join(save_prediction_fn, f"smplx_params_body_id-{body_id:02d}.npz"),
                 smplx_pose=smplx_pose.detach().cpu().numpy(),
                 smplx_betas=smplx_betas.detach().cpu().numpy(),
@@ -675,7 +684,15 @@ def main(optim_cfg_fn, cam_names, metadata_data_pth:str, imgs_pth:str, paths: Pa
                 triangulated_3d_pts=triangulated_3d_pts[body_id].cpu().numpy() if triangulated_3d_pts[body_id] is not None else None,
                 smplx_contact=smplx_contact[body_id].cpu().numpy() if smplx_contact[body_id] is not None else None,
                 smplx_floor_contact=smplx_floor_contact[body_id].cpu().numpy() if smplx_floor_contact[body_id] is not None else None,
-                v_template_pred=v_template_pred)
+                v_template_pred=v_template_pred,
+                # Self-describing metadata for the SMPL-X/Blender exporter
+                # (export_blender.py). Additive + namespaced: existing readers
+                # ignore these keys, and the exporter falls back to defaults (and
+                # auto-detects flat_hand_mean from the verts) for older files.
+                smplx_export_model_type="smplx",
+                smplx_export_gender="neutral",
+                smplx_export_flat_hand_mean=_export_flat_hand_mean,
+                smplx_export_num_betas=int(smplx_betas.shape[-1]))
 
         # ma_vis consumes pred_vertices from this file regardless of whether
         # a real GT exists, so write it unconditionally. With use_gt=False
