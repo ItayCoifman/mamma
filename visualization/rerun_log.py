@@ -41,6 +41,149 @@ def _set_time_seconds(seconds: float) -> None:
         rr.set_time_seconds("time", seconds)
 
 
+def _ffmpeg_bin() -> str:
+    """Path to an ffmpeg binary: system ``ffmpeg`` first, else the one bundled
+    with ``imageio-ffmpeg`` (so the H.264 backdrop works without a system install)."""
+    import shutil
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def ffmpeg_available() -> bool:
+    """True when an ffmpeg binary is reachable (system or bundled). Used to
+    decide whether the default H.264 backdrop can run, or must fall back to JPEG."""
+    import os
+    import shutil
+    if shutil.which("ffmpeg"):
+        return True
+    try:
+        import imageio_ffmpeg
+        return os.path.exists(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return False
+
+
+def _probe_video_codec(path: str) -> str:
+    """Source video codec name ('h264', 'hevc', 'av1', ...); '' on failure."""
+    import shutil
+    import subprocess
+    ffprobe = shutil.which("ffprobe") or "ffprobe"
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of",
+             "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _video_cache_dir(src_path: str) -> str:
+    """Writable cache dir for re-encoded H.264. Prefers next-to-source (so the
+    encode is reused across runs/out-tags), falls back to the system temp dir."""
+    import os
+    import tempfile
+    cand = os.path.join(os.path.dirname(os.path.abspath(src_path)),
+                        ".mamma_rrd_video_cache")
+    try:
+        os.makedirs(cand, exist_ok=True)
+        probe = os.path.join(cand, ".w")
+        open(probe, "w").close()
+        os.remove(probe)
+        return cand
+    except OSError:
+        d = os.path.join(tempfile.gettempdir(), "mamma_rrd_video_cache")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+def _ensure_h264(src_path, width, height, frame_start, frame_end, crf):
+    """Path to an H.264 mp4 of ``src_path`` at ``width``x``height`` for frames
+    ``[frame_start, frame_end)`` — re-encoding **only when necessary** and caching.
+
+    Re-encode is skipped (the original is returned) when the source is already
+    H.264 at the requested framing, since H.264 is the one codec the rerun web
+    viewer decodes everywhere. Otherwise we decode -> re-encode H.264 (this is
+    also what makes HEVC/AV1 sources viewable). ``-bf 0`` keeps access units in
+    display order so each maps 1:1 to a timeline frame.
+    """
+    import os
+    import hashlib
+    import subprocess
+    import cv2
+
+    fs = int(frame_start or 0)
+    fe = None if frame_end is None else int(frame_end)
+    codec = _probe_video_codec(src_path)
+    cap = cv2.VideoCapture(src_path)
+    nw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    nh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    ntot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    need_trim = fs > 0 or (fe is not None and fe < ntot)
+    need_resize = (int(width), int(height)) != (nw, nh)
+    if codec == "h264" and not need_trim and not need_resize:
+        return src_path  # already viewer-ready at the requested framing
+
+    cache = _video_cache_dir(src_path)
+    try:
+        mtime = int(os.path.getmtime(src_path))
+    except OSError:
+        mtime = 0
+    # Bump _ENCODE_RECIPE whenever the ffmpeg recipe changes so stale cached
+    # re-encodes are regenerated rather than silently reused.
+    _ENCODE_RECIPE = "v3-bt709-main-gop30-lvl40"
+    key = hashlib.md5(
+        f"{os.path.abspath(src_path)}:{mtime}:{width}x{height}:{fs}:{fe}:"
+        f"{crf}:{_ENCODE_RECIPE}".encode()
+    ).hexdigest()[:12]
+    out = os.path.join(cache, f"{key}.mp4")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out  # cache hit — no re-encode
+
+    vf = []
+    if need_trim:
+        end_expr = f":end_frame={fe}" if fe is not None else ""
+        vf.append(f"trim=start_frame={fs}{end_expr}")
+        vf.append("setpts=PTS-STARTPTS")
+    # Convert the source (whatever its matrix is) to BT.709 limited-range
+    # yuv420p, then tag it fully below. The browser's WebCodecs decoder renders
+    # BLACK when the stream carries an unusual matrix (e.g. bt470bg) or 'unknown'
+    # transfer/primaries — native decoders tolerate it, WebCodecs does not. So we
+    # normalise + fully specify the colour signalling for cross-browser playback.
+    vf.append(f"scale={int(width)}:{int(height)}:out_color_matrix=bt709")
+    vf.append("format=yuv420p")
+    tmp = out + ".tmp.mp4"
+    subprocess.run(
+        [_ffmpeg_bin(), "-y", "-i", src_path, "-vf", ",".join(vf), "-an",
+         # WebCodecs (the browser decoder) is far stricter than the native one:
+         #  - 'main' profile + an explicit, sufficient level (4.0 covers <=1080p)
+         #    so the stream isn't rejected for an under-reported level;
+         #  - frequent keyframes (1s GOP, no scene-cut jitter) so the viewer can
+         #    always start decoding from a nearby IDR — a long default GOP leaves
+         #    only one keyframe, which can render black on seek/scrub in-browser;
+         #  - bf=0 keeps access units in display order for 1:1 timeline mapping.
+         "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0",
+         "-preset", "medium", "-crf", str(int(crf)),
+         "-bf", "0", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+         "-pix_fmt", "yuv420p",
+         "-colorspace", "bt709", "-color_primaries", "bt709",
+         "-color_trc", "bt709", "-color_range", "tv",
+         "-movflags", "+faststart", tmp],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True,
+    )
+    os.replace(tmp, out)
+    return out
+
+
 def _vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     """Per-vertex smooth normals via area-weighted face-normal accumulation.
 
@@ -507,3 +650,73 @@ class RerunSceneLogger:
                             contents=jpeg, media_type="image/jpeg",
                         ),
                     )
+
+    def log_camera_video_streams(
+        self,
+        cameras: Iterable[Camera],
+        crf: int = 20,
+        num_workers: Optional[int] = None,
+    ) -> None:
+        """Opt-in alternative to :meth:`log_camera_image_streams`: log each
+        camera's source video as a re-encoded H.264 ``rr.AssetVideo`` (with a
+        per-frame ``rr.VideoFrameReference``) instead of a per-frame JPEG stream.
+
+        ~10-15x smaller ``.rrd`` and viewer-compatible for any source codec (we
+        always re-encode to H.264, which also fixes HEVC/AV1-in-viewer). Video
+        frames land on the same ``frame_id / fps`` timeline the overlays use, so
+        2D landmarks stay aligned. The re-encode is skipped when the source is
+        already H.264 at the requested framing, and cached otherwise. Cameras
+        with only image directories (no ``video_path``) are skipped with a
+        warning.
+        """
+        rr = self._rr
+        cam_list = [c for c in cameras]
+        vids = [c for c in cam_list if getattr(c, "video_path", None)]
+        for c in cam_list:
+            if not getattr(c, "video_path", None):
+                log.warning(
+                    "cam %s: --rerun-video needs a source video; skipping its "
+                    "backdrop", c.name,
+                )
+        if not vids:
+            return
+        workers = (min(len(vids), 4) if num_workers is None
+                   else max(1, int(num_workers)))
+
+        def _prep(cam: Camera):
+            scale = self._effective_scale(cam)
+            # even dims: H.264 + yuv420p require width/height divisible by 2.
+            w = max(2, (int(round(cam.width * scale)) // 2) * 2)
+            h = max(2, (int(round(cam.height * scale)) // 2) * 2)
+            fs = cam.frame_start if cam.frame_start is not None else 0
+            return cam, _ensure_h264(cam.video_path, w, h, fs, cam.frame_end, crf)
+
+        log.info("camera video streams: %d cameras, %d worker(s), crf %d",
+                 len(vids), workers, crf)
+        prepped = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for fut in [ex.submit(_prep, c) for c in vids]:
+                try:
+                    prepped.append(fut.result())
+                except Exception as e:  # noqa: BLE001 - re-encode is best-effort
+                    log.warning("video re-encode failed (skipping backdrop): %s", e)
+
+        # Rerun logging stays on one thread (single global recording).
+        for cam, mp4 in prepped:
+            entity = f"{_CAM_TAG}/{cam.name}/image"
+            video = rr.AssetVideo(path=mp4)
+            rr.log(entity, video, static=True)
+            ts_ns = np.asarray(video.read_frame_timestamps_nanos())
+            if ts_ns.size == 0:
+                log.warning("cam %s: re-encoded video has no frames", cam.name)
+                continue
+            secs = np.arange(ts_ns.size, dtype=float) / float(self.fps)
+            try:
+                rr.send_columns(
+                    entity,
+                    indexes=[rr.TimeColumn("time", timestamp=secs)],
+                    columns=rr.VideoFrameReference.columns_nanos(ts_ns),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("cam %s: VideoFrameReference columnar log failed (%s); "
+                            "video logged without per-frame refs", cam.name, e)

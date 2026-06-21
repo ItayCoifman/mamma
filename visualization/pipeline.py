@@ -35,7 +35,7 @@ from .cameras import Camera, MultiViewCameras
 from .collage import make_preview_collage
 from .motion import load_landmarks, load_predicted_vertices
 from .overlay import _default_palette, render_overlay_videos
-from .rerun_log import RerunSceneLogger, compute_floor_height
+from .rerun_log import RerunSceneLogger, compute_floor_height, ffmpeg_available
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,9 @@ def run_visualization(
     rerun_image_long_edge: int = 480,
     rerun_image_jpeg_quality: int = 75,
     rerun_image_num_workers: Optional[int] = None,
+    rerun_video: bool = True,
+    rerun_video_long_edge: int = 720,
+    rerun_video_crf: int = 20,
 ) -> Path:
     """Run the full visualization pipeline. Returns the path to ``scene.rrd``.
 
@@ -132,11 +135,22 @@ def run_visualization(
         colors_rgb = _default_palette(max(10, len(motions)))
 
     # ---- Rerun scene log ----------------------------------------------
-    # When --rerun-images is on, image_long_edge drives a per-camera
-    # display scale so Pinhole, 2D landmarks, and the JPEG backdrop all
-    # land on the same downscaled pixel grid. Otherwise we fall back to
-    # the legacy single --rerun-display-scale.
-    image_long_edge = int(rerun_image_long_edge) if rerun_images else None
+    # The H.264 video backdrop (rerun_video) is the default; it needs an ffmpeg
+    # binary, so when none is reachable we transparently fall back to the legacy
+    # per-frame JPEG path rather than failing the run.
+    use_video = bool(rerun_video) and ffmpeg_available()
+    if rerun_video and not use_video:
+        log.warning("--rerun-video is on but no ffmpeg binary was found "
+                    "(system or imageio-ffmpeg); falling back to the JPEG backdrop")
+    # image_long_edge drives a per-camera display scale so Pinhole, 2D landmarks,
+    # and the backdrop all land on the same downscaled pixel grid. The video path
+    # uses its own (higher) long-edge default since H.264 makes resolution cheap.
+    if use_video:
+        image_long_edge = int(rerun_video_long_edge)
+    elif rerun_images:
+        image_long_edge = int(rerun_image_long_edge)
+    else:
+        image_long_edge = None
     t = time.perf_counter()
     with RerunSceneLogger(
         rrd_path=str(rrd_path),
@@ -158,7 +172,15 @@ def run_visualization(
             logger.log_landmark_projections(cameras, landmarks_by_cam, colors_rgb)
             log.info("logged landmark projections in %.2fs", time.perf_counter() - t)
 
-        if rerun_images:
+        if use_video:
+            t = time.perf_counter()
+            logger.log_camera_video_streams(
+                cameras,
+                crf=rerun_video_crf,
+                num_workers=rerun_image_num_workers,
+            )
+            log.info("logged camera video streams in %.2fs", time.perf_counter() - t)
+        elif rerun_images:
             t = time.perf_counter()
             logger.log_camera_image_streams(
                 cameras,
