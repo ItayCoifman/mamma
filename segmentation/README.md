@@ -18,8 +18,8 @@ and matches them to the init camera's IDs.
 |-----------------------------------|---------------------------------------------------------------------|:-----:|
 | `--sam_version sam2`              | YOLO detects people → SAM2 tracks with multi-frame bbox anchors      |  Yes  |
 | `--sam_version sam3`              | YOLO detects people → SAM3 tracks (single bbox anchor)               |  Yes  |
-| `--sam_version sam3_prompt`       | SAM3 text prompt `"person"` (multiplex session) + SAM3 tracks all    |  No   |
-| `--sam_version sam3_prompt_light` | SAM3 text prompt `"person"` (detector) → SAM3 tracks — ~20% less VRAM, no OOM on long clips; cross-camera IDs slightly less robust on 4–5 person scenes |  No   |
+| `--sam_version sam3_prompt`       | SAM3 text prompt `"person"` detects **and** tracks, all in SAM3's full video predictor |  No   |
+| `--sam_version sam3_prompt_light` | Same text prompt `"person"`, but detection runs on SAM3's detector and tracking on the lean SAM3 tracker — lighter than `sam3_prompt` (see Performance below) |  No   |
 
 Alternatively, **instead of automatically** defining the people to be tracked, the `--interactive` opens a GUI on the
 init camera where you can manually click on the people (keys 0-9 to switch person, left-click to mark, right-click to
