@@ -199,7 +199,7 @@ exports:
   # matching are produced regardless. Also settable via --debug_crop_summary. (issue #14)
   debug_crop_summary: false
 
-  # Keep full-res frames + masks in masks.npy (~100x larger). Off by default:
+  # Keep full-res frames + masks in masks.npy (~10x larger). Off by default:
   # masks.npy is slimmed to what matching/resume actually need (per-person
   # centroids + crops + CLIP features); the full-res masks remain on disk as the
   # per-frame mask PNGs. Also settable via --debug_full_masks_npy. (issue #14)

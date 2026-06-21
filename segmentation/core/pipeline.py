@@ -4339,7 +4339,7 @@ class SegmentMultipleFrames:
         """Whether masks.npy should keep the full-res frames + masks.
 
         Off by default: masks.npy is slimmed to what matching/resume need
-        (centroids + crops + features), ~100x smaller. The full-res masks remain
+        (centroids + crops + features), ~10x smaller. The full-res masks remain
         available as the per-frame mask PNGs. Enable with
         ``exports.debug_full_masks_npy`` / ``--debug_full_masks_npy``.
         """

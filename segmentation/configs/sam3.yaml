@@ -186,7 +186,7 @@ exports:
   # produced either way. Also settable via --debug_crop_summary. (issue #14)
   debug_crop_summary: false
 
-  # Keep full-res frames + masks in masks.npy (~100x larger). Off by default:
+  # Keep full-res frames + masks in masks.npy (~10x larger). Off by default:
   # masks.npy is slimmed to centroids + crops + features; full masks remain as
   # the per-frame PNGs. Also settable via --debug_full_masks_npy. (issue #14)
   debug_full_masks_npy: false
