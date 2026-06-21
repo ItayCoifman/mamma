@@ -17,6 +17,11 @@ warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*", categ
 
 logger = logging.getLogger(__name__)
 
+# NOTE: this and _frame_store_fp16 below are process-wide module state read by the
+# patched SAM loaders. They assume a single active pipeline per process (the runner's
+# model — set once per run, before loading). Two pipelines with different settings in
+# one process would race; revisit if the GUI ever loads pipelines concurrently.
+#
 # Frame filter: when set, the patched SAM frame loaders only load filenames
 # in this set. Set to None to load all frames (default behavior).
 # Used by _apply_frame_range to avoid copying/symlinking frames.
