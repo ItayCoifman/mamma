@@ -352,13 +352,25 @@ class _Sam3TextDetectMixin:
     _text_proc = None
 
     def text_detect(self, image_rgb, text="person", conf_thresh=0.5):
+        import numpy as np
+        from PIL import Image
         if self._detector is None:
             raise RuntimeError("text_detect requires self._detector (a SAM3 detector) to be set")
         if self._text_proc is None:
             from sam3.model.sam3_image_processor import Sam3Processor
-            self._text_proc = Sam3Processor(self._detector)
-        import numpy as np
-        from PIL import Image
+            # Build on the detector's OWN device, not Sam3Processor's hardcoded
+            # "cuda" default — so text detection works on CPU/MPS hosts too.
+            try:
+                dev = next(self._detector.parameters()).device
+            except StopIteration:
+                dev = "cuda"
+            self._text_proc = Sam3Processor(self._detector, device=dev)
+        # Honor the caller's threshold per call. Sam3Processor hard-filters boxes
+        # at self.confidence_threshold *inside* grounding (default 0.5), and we
+        # cache the processor — so without this, the pipeline's lower-threshold
+        # fallback (0.4/0.25/0.15 on hard frames) would be a silent no-op for SAM3.
+        # Set it before set_text_prompt (which runs grounding). (issue #14)
+        self._text_proc.confidence_threshold = float(conf_thresh)
         # Pass a PIL image: Sam3Processor.set_image reads dims as image.shape[-2:]
         # for arrays, which mis-reads (H,W,3) numpy as width=3 → collapsed x-scale.
         # PIL.size is read correctly, so boxes come back in true pixel coords.
